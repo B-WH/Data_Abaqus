@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Abaqus databases and generated files
+*.odb
+*.lck
+*.dat
+*.msg
+*.sta
+*.sim
+*.prt
+*.com
+*.inp~
+
+# Extracted outputs
+output/
+
+# Editor and OS files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
