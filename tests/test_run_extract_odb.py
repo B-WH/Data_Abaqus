@@ -6,6 +6,13 @@ import run_extract_odb as launcher
 
 
 class LauncherTests(unittest.TestCase):
+    class FakeVar(object):
+        def __init__(self, value=""):
+            self.value = value
+
+        def get(self):
+            return self.value
+
     def test_build_extraction_command_includes_abaqus_python_script_and_options(self):
         command = launcher.build_extraction_command(
             abaqus_command="abq2024",
@@ -15,6 +22,10 @@ class LauncherTests(unittest.TestCase):
             metadata_path=r"D:\work\output\meta.json",
             step_name="HARMONIC_RESPONSE",
             fields=["U", "A"],
+            instances=["PART-1-1"],
+            node_labels=[25, 30],
+            frequency_min=5.0,
+            frequency_max=50.0,
         )
 
         self.assertEqual(
@@ -34,6 +45,15 @@ class LauncherTests(unittest.TestCase):
                 "--fields",
                 "U",
                 "A",
+                "--instances",
+                "PART-1-1",
+                "--node-labels",
+                "25",
+                "30",
+                "--frequency-min",
+                "5.0",
+                "--frequency-max",
+                "50.0",
             ],
         )
 
@@ -126,6 +146,17 @@ class LauncherTests(unittest.TestCase):
 
         self.assertEqual(os.path.basename(script_path), "Extract_data_ODB.py")
 
+    def test_default_extractor_script_uses_pyinstaller_bundle_directory(self):
+        bundle_dir = os.path.join("temporary", "pyinstaller_bundle")
+
+        with mock.patch.object(launcher.sys, "_MEIPASS", bundle_dir, create=True):
+            script_path = launcher.default_extractor_script()
+
+        self.assertEqual(
+            script_path,
+            os.path.join(bundle_dir, "Extract_data_ODB.py"),
+        )
+
     def test_parse_field_text_accepts_commas_and_whitespace(self):
         self.assertEqual(
             launcher.parse_field_text("U, UR  V\nA"),
@@ -135,6 +166,24 @@ class LauncherTests(unittest.TestCase):
     def test_parse_field_text_returns_none_for_blank_text(self):
         self.assertIsNone(launcher.parse_field_text("  ,  "))
 
+    def test_parse_node_label_text_accepts_commas_and_whitespace(self):
+        self.assertEqual(launcher.parse_node_label_text("25, 30\n45"), [25, 30, 45])
+
+    def test_parse_node_label_text_returns_none_for_blank_text(self):
+        self.assertIsNone(launcher.parse_node_label_text("  ,  "))
+
+    def test_parse_node_label_text_rejects_non_integer(self):
+        with self.assertRaises(ValueError):
+            launcher.parse_node_label_text("25 A")
+
+    def test_parse_optional_float_accepts_blank_and_number(self):
+        self.assertIsNone(launcher.parse_optional_float("  "))
+        self.assertEqual(launcher.parse_optional_float("12.5"), 12.5)
+
+    def test_parse_optional_float_rejects_invalid_text(self):
+        with self.assertRaises(ValueError):
+            launcher.parse_optional_float("low")
+
     def test_parse_field_list_output_reads_json_line(self):
         metadata = launcher.parse_field_list_output(
             'Abaqus startup text\n{"fields": ["A", "U", "V"], "step": "Step-1"}\n'
@@ -143,10 +192,62 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(metadata["fields"], ["A", "U", "V"])
         self.assertEqual(metadata["step"], "Step-1")
 
+    def test_parse_args_accepts_point_export_options(self):
+        args = launcher.parse_args(
+            [
+                "--odb",
+                "data/test1.odb",
+                "--points",
+                "points.csv",
+                "--point-output",
+                "output/points.csv",
+                "--point-fields",
+                "U",
+                "V",
+                "--neighbors",
+                "6",
+                "--exact-tol",
+                "1e-8",
+            ]
+        )
+
+        self.assertEqual(args.points, "points.csv")
+        self.assertEqual(args.point_output, "output/points.csv")
+        self.assertEqual(args.point_fields, ["U", "V"])
+        self.assertEqual(args.neighbors, 6)
+        self.assertEqual(args.exact_tol, 1.0e-8)
+
     def test_ui_text_is_chinese(self):
         self.assertEqual(launcher.UI_TEXT["window_title"], "Abaqus ODB 数据提取工具")
         self.assertEqual(launcher.UI_TEXT["run_button"], "开始提取")
         self.assertEqual(launcher.UI_TEXT["refresh_fields"], "读取场输出")
+        self.assertEqual(launcher.UI_TEXT["select_all_fields"], "全选")
+        self.assertEqual(launcher.UI_TEXT["clear_all_fields"], "全不选")
+        self.assertEqual(launcher.UI_TEXT["select_default_fields"], "默认字段")
+
+    def test_choose_field_names_supports_all_none_and_default_modes(self):
+        fields = ["A", "LE", "S", "U"]
+
+        self.assertEqual(
+            launcher.choose_field_names(fields, "all"),
+            ["A", "LE", "S", "U"],
+        )
+        self.assertEqual(launcher.choose_field_names(fields, "none"), [])
+        self.assertEqual(
+            launcher.choose_field_names(fields, "default"),
+            ["A", "U"],
+        )
+
+    def test_choose_field_names_handles_empty_default_field_text(self):
+        with mock.patch.object(launcher, "DEFAULT_FIELD_TEXT", "  ,  "):
+            self.assertEqual(
+                launcher.choose_field_names(["A", "U"], "default"),
+                [],
+            )
+
+    def test_choose_field_names_rejects_unknown_mode(self):
+        with self.assertRaises(ValueError):
+            launcher.choose_field_names(["U"], "invalid")
 
     def test_default_output_paths_use_odb_base_name(self):
         output_path, metadata_path = launcher.default_output_paths(
@@ -156,6 +257,133 @@ class LauncherTests(unittest.TestCase):
 
         self.assertEqual(output_path, r"D:\work\output\test1_point_data.npz")
         self.assertEqual(metadata_path, r"D:\work\output\test1_point_metadata.json")
+
+    def test_default_point_output_path_uses_odb_base_name(self):
+        output_path = launcher.default_point_output_path(
+            r"D:\work\data\test1.odb",
+            output_dir=r"D:\work\output",
+        )
+
+        self.assertEqual(output_path, r"D:\work\output\test1_interpolated_points.csv")
+
+    def test_run_workflow_extracts_then_interpolates_points(self):
+        calls = []
+
+        def fake_extraction(**kwargs):
+            calls.append(("extract", kwargs))
+            return 0
+
+        def fake_points(**kwargs):
+            calls.append(("points", kwargs))
+            return [{"point_id": "p1"}]
+
+        code = launcher.run_workflow(
+            abaqus_command="abaqus",
+            script_path="Extract_data_ODB.py",
+            odb_path=r"D:\work\data\test1.odb",
+            output_path=r"D:\work\output\data.npz",
+            metadata_path=r"D:\work\output\meta.json",
+            fields=["U"],
+            points_path=r"D:\work\points.csv",
+            point_output_path=r"D:\work\output\points.csv",
+            point_fields=["U"],
+            neighbors=5,
+            exact_tol=1.0e-8,
+            extraction_runner=fake_extraction,
+            point_runner=fake_points,
+            verbose=False,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual([call[0] for call in calls], ["extract", "points"])
+        self.assertEqual(calls[0][1]["fields"], ["U"])
+        self.assertEqual(calls[1][1]["data_path"], r"D:\work\output\data.npz")
+        self.assertEqual(calls[1][1]["metadata_path"], r"D:\work\output\meta.json")
+        self.assertEqual(calls[1][1]["points_path"], r"D:\work\points.csv")
+        self.assertEqual(calls[1][1]["output_path"], r"D:\work\output\points.csv")
+        self.assertEqual(calls[1][1]["fields"], ["U"])
+        self.assertEqual(calls[1][1]["neighbors"], 5)
+        self.assertEqual(calls[1][1]["exact_tol"], 1.0e-8)
+
+    def test_run_workflow_skips_point_export_when_extraction_fails(self):
+        point_calls = []
+
+        def fake_extraction(**_kwargs):
+            return 3
+
+        def fake_points(**kwargs):
+            point_calls.append(kwargs)
+
+        code = launcher.run_workflow(
+            abaqus_command="abaqus",
+            script_path="Extract_data_ODB.py",
+            odb_path="data/test1.odb",
+            points_path="points.csv",
+            extraction_runner=fake_extraction,
+            point_runner=fake_points,
+            verbose=False,
+        )
+
+        self.assertEqual(code, 3)
+        self.assertEqual(point_calls, [])
+
+    def test_run_workflow_supplies_default_data_paths_for_point_export(self):
+        calls = []
+
+        def fake_extraction(**kwargs):
+            calls.append(("extract", kwargs))
+            return 0
+
+        def fake_points(**kwargs):
+            calls.append(("points", kwargs))
+            return []
+
+        code = launcher.run_workflow(
+            abaqus_command="abaqus",
+            script_path="Extract_data_ODB.py",
+            odb_path=r"D:\work\data\test1.odb",
+            output_path=None,
+            metadata_path=None,
+            points_path=r"D:\work\points.csv",
+            point_output_path=None,
+            extraction_runner=fake_extraction,
+            point_runner=fake_points,
+            verbose=False,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[0][1]["output_path"], launcher.default_output_paths(r"D:\work\data\test1.odb")[0])
+        self.assertEqual(calls[0][1]["metadata_path"], launcher.default_output_paths(r"D:\work\data\test1.odb")[1])
+        self.assertEqual(calls[1][1]["output_path"], launcher.default_point_output_path(r"D:\work\data\test1.odb"))
+
+    def test_validate_inputs_includes_point_export_options(self):
+        app = object.__new__(launcher.ExtractOdbApp)
+        app.odb_var = self.FakeVar("data/test1.odb")
+        app.output_var = self.FakeVar("output/data.npz")
+        app.metadata_var = self.FakeVar("output/meta.json")
+        app.step_var = self.FakeVar("Step-1")
+        app.fields_var = self.FakeVar("U V")
+        app.instances_var = self.FakeVar("PART-1-1")
+        app.node_labels_var = self.FakeVar("1 2")
+        app.frequency_min_var = self.FakeVar("5")
+        app.frequency_max_var = self.FakeVar("50")
+        app.points_var = self.FakeVar("points.csv")
+        app.point_output_var = self.FakeVar("output/points.csv")
+        app.point_fields_var = self.FakeVar("U")
+        app.neighbors_var = self.FakeVar("6")
+        app.exact_tol_var = self.FakeVar("1e-8")
+        app.abaqus_var = self.FakeVar("abaqus")
+        app.script_var = self.FakeVar("Extract_data_ODB.py")
+        app.field_vars = {}
+
+        with mock.patch.object(launcher.os.path, "exists", return_value=True):
+            options = app._validate_inputs()
+
+        self.assertEqual(options["points_path"], "points.csv")
+        self.assertEqual(options["point_output_path"], "output/points.csv")
+        self.assertEqual(options["point_fields"], ["U"])
+        self.assertEqual(options["neighbors"], 6)
+        self.assertEqual(options["exact_tol"], 1.0e-8)
 
     def test_main_without_arguments_runs_gui(self):
         calls = []
@@ -172,12 +400,32 @@ class LauncherTests(unittest.TestCase):
     def test_main_with_arguments_runs_cli(self):
         with mock.patch.object(launcher, "find_abaqus_command", return_value="abaqus"):
             with mock.patch.object(
-                launcher, "run_extraction", return_value=0
-            ) as run_extraction:
+                launcher, "run_workflow", return_value=0
+            ) as run_workflow:
                 code = launcher.main(["--odb", "data/test1.odb"])
 
         self.assertEqual(code, 0)
-        self.assertEqual(run_extraction.call_count, 1)
+        self.assertEqual(run_workflow.call_count, 1)
+
+    def test_main_with_points_runs_integrated_workflow(self):
+        with mock.patch.object(launcher, "find_abaqus_command", return_value="abaqus"):
+            with mock.patch.object(
+                launcher, "run_workflow", return_value=0
+            ) as run_workflow:
+                code = launcher.main(
+                    [
+                        "--odb",
+                        "data/test1.odb",
+                        "--points",
+                        "points.csv",
+                        "--point-output",
+                        "output/points.csv",
+                    ]
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(run_workflow.call_args[1]["points_path"], "points.csv")
+        self.assertEqual(run_workflow.call_args[1]["point_output_path"], "output/points.csv")
 
 
 if __name__ == "__main__":

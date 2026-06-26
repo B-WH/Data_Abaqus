@@ -12,8 +12,9 @@ import Extract_data_ODB as extractor
 
 
 class FakeNode(object):
-    def __init__(self, label):
+    def __init__(self, label, coordinates=None):
         self.label = label
+        self.coordinates = coordinates or (float(label), 0.0, 0.0)
 
 
 class FakeInstance(object):
@@ -67,8 +68,10 @@ class FakeSubset(object):
 
 
 class FakeFieldOutput(object):
-    def __init__(self, values):
+    def __init__(self, values, component_labels=None):
         self._values = values
+        if component_labels is not None:
+            self.componentLabels = component_labels
 
     def getSubset(self, region=None):
         return FakeSubset(self._values)
@@ -119,11 +122,20 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(
             nodes,
             [
-                extractor.NodeRef("PART-1-1", 1),
-                extractor.NodeRef("PART-1-1", 2),
-                extractor.NodeRef("PART-2-1", 3),
+                extractor.NodeRef("PART-1-1", 1, (1.0, 0.0, 0.0)),
+                extractor.NodeRef("PART-1-1", 2, (2.0, 0.0, 0.0)),
+                extractor.NodeRef("PART-2-1", 3, (3.0, 0.0, 0.0)),
             ],
         )
+
+    def test_collect_nodes_can_filter_instances_and_node_labels(self):
+        nodes = extractor.collect_nodes(
+            FakeOdb(),
+            instances=["PART-1-1"],
+            node_labels=[2],
+        )
+
+        self.assertEqual(nodes, [extractor.NodeRef("PART-1-1", 2, (2.0, 0.0, 0.0))])
 
     def test_collect_field_names_returns_sorted_unique_frame_outputs(self):
         step = FakeStep(
@@ -137,8 +149,8 @@ class ExtractorTests(unittest.TestCase):
 
     def test_extract_field_arrays_preserves_real_imaginary_and_marks_missing_values(self):
         nodes = [
-            extractor.NodeRef("PART-1-1", 1),
-            extractor.NodeRef("PART-1-1", 2),
+            extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0)),
+            extractor.NodeRef("PART-1-1", 2, (1.0, 0.0, 0.0)),
         ]
         step = FakeStep(
             [
@@ -148,7 +160,8 @@ class ExtractorTests(unittest.TestCase):
                         "U": FakeFieldOutput(
                             [
                                 FakeValue("PART-1-1", 1, (1.0, 2.0, 3.0), (0.1, 0.2, 0.3)),
-                            ]
+                            ],
+                            component_labels=("U1", "U2", "U3"),
                         )
                     },
                 ),
@@ -159,7 +172,8 @@ class ExtractorTests(unittest.TestCase):
                             [
                                 FakeValue("PART-1-1", 1, (4.0, 5.0, 6.0)),
                                 FakeValue("PART-1-1", 2, (7.0, 8.0, 9.0), (0.7, 0.8, 0.9)),
-                            ]
+                            ],
+                            component_labels=("U1", "U2", "U3"),
                         )
                     },
                 ),
@@ -170,6 +184,7 @@ class ExtractorTests(unittest.TestCase):
 
         self.assertEqual(arrays["frequencies"].tolist(), [5.0, 10.0])
         self.assertEqual(arrays["node_labels"].tolist(), [1, 2])
+        self.assertEqual(arrays["node_coordinates"].tolist(), [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
         self.assertEqual(arrays["U_real"].shape, (2, 2, 3))
         self.assertEqual(arrays["U_imag"].shape, (2, 2, 3))
         self.assertEqual(arrays["U_real"][0, 0].tolist(), [1.0, 2.0, 3.0])
@@ -184,9 +199,50 @@ class ExtractorTests(unittest.TestCase):
             )
         )
         self.assertEqual(metadata["array_shapes"]["U_real"], [2, 2, 3])
+        self.assertEqual(metadata["array_shapes"]["node_coordinates"], [2, 3])
+        self.assertEqual(metadata["array_layouts"]["U_real"], ["frame", "node", "component"])
+        self.assertEqual(metadata["array_layouts"]["U_imag"], ["frame", "node", "component"])
+        self.assertEqual(metadata["array_layouts"]["node_coordinates"], ["node", "coordinate"])
+        self.assertEqual(metadata["field_outputs"]["U"]["components"], ["U1", "U2", "U3"])
+        self.assertEqual(
+            metadata["field_outputs"]["U"]["array_layout"],
+            ["frame", "node", "component"],
+        )
+
+    def test_extract_field_arrays_can_filter_frequency_range(self):
+        nodes = [extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0))]
+        step = FakeStep(
+            [
+                FakeFrame(
+                    5.0,
+                    {"U": FakeFieldOutput([FakeValue("PART-1-1", 1, (1.0, 2.0, 3.0))])},
+                ),
+                FakeFrame(
+                    10.0,
+                    {"U": FakeFieldOutput([FakeValue("PART-1-1", 1, (4.0, 5.0, 6.0))])},
+                ),
+                FakeFrame(
+                    15.0,
+                    {"U": FakeFieldOutput([FakeValue("PART-1-1", 1, (7.0, 8.0, 9.0))])},
+                ),
+            ]
+        )
+
+        arrays, metadata = extractor.extract_field_arrays(
+            step,
+            nodes,
+            ["U"],
+            frequency_min=7.5,
+            frequency_max=12.5,
+        )
+
+        self.assertEqual(arrays["frequencies"].tolist(), [10.0])
+        self.assertEqual(arrays["U_real"].shape, (1, 1, 3))
+        self.assertEqual(arrays["U_real"][0, 0].tolist(), [4.0, 5.0, 6.0])
+        self.assertEqual(metadata["array_shapes"]["frequencies"], [1])
 
     def test_extract_field_arrays_reads_all_values_without_passing_none_region(self):
-        nodes = [extractor.NodeRef("PART-1-1", 1)]
+        nodes = [extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0))]
         step = FakeStep(
             [
                 FakeFrame(
@@ -208,7 +264,7 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(metadata["warnings"], [])
 
     def test_extract_field_arrays_supports_scalar_node_field_outputs(self):
-        nodes = [extractor.NodeRef("PART-1-1", 1)]
+        nodes = [extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0))]
         step = FakeStep(
             [
                 FakeFrame(
@@ -231,9 +287,11 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(arrays["POR_real"][0, 0, 0], 12.5)
         self.assertEqual(arrays["POR_imag"][0, 0, 0], 0.25)
         self.assertEqual(metadata["field_outputs"]["POR"]["location"], "NODE")
+        self.assertEqual(metadata["field_outputs"]["POR"]["components"], ["POR"])
+        self.assertEqual(metadata["array_layouts"]["POR_real"], ["frame", "node", "component"])
 
     def test_extract_field_arrays_supports_element_integration_point_outputs(self):
-        nodes = [extractor.NodeRef("PART-1-1", 1)]
+        nodes = [extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0))]
         step = FakeStep(
             [
                 FakeFrame(
@@ -247,7 +305,8 @@ class ExtractorTests(unittest.TestCase):
                                     (1.0, 2.0, 3.0, 4.0, 5.0, 6.0),
                                     integration_point=1,
                                 ),
-                            ]
+                            ],
+                            component_labels=("S11", "S22", "S33", "S12", "S13", "S23"),
                         )
                     },
                 ),
@@ -262,7 +321,8 @@ class ExtractorTests(unittest.TestCase):
                                     (7.0, 8.0, 9.0, 10.0, 11.0, 12.0),
                                     integration_point=1,
                                 ),
-                            ]
+                            ],
+                            component_labels=("S11", "S22", "S33", "S12", "S13", "S23"),
                         )
                     },
                 ),
@@ -276,6 +336,18 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(arrays["S_real"][0, 0].tolist(), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
         self.assertEqual(arrays["S_imag"][0, 0].tolist(), [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.assertEqual(metadata["field_outputs"]["S"]["location"], "ELEMENT")
+        self.assertEqual(
+            metadata["field_outputs"]["S"]["components"],
+            ["S11", "S22", "S33", "S12", "S13", "S23"],
+        )
+        self.assertEqual(
+            metadata["field_outputs"]["S"]["array_layout"],
+            ["frame", "element_point", "component"],
+        )
+        self.assertEqual(
+            metadata["array_layouts"]["S_real"],
+            ["frame", "element_point", "component"],
+        )
         self.assertEqual(
             metadata["field_outputs"]["S"]["points"],
             [
@@ -291,6 +363,7 @@ class ExtractorTests(unittest.TestCase):
         arrays = {
             "frequencies": np.array([5.0]),
             "node_labels": np.array([25]),
+            "node_coordinates": np.array([[1.2, 0.0, 0.0]]),
             "U_real": np.array([[[1.0, 2.0, 3.0]]]),
             "U_imag": np.array([[[0.1, 0.2, 0.3]]]),
         }
@@ -298,6 +371,7 @@ class ExtractorTests(unittest.TestCase):
             "source_odb": "data/test1.odb",
             "step": "HARMONIC_RESPONSE",
             "fields": ["U"],
+            "array_layouts": {"U_real": ["frame", "node", "component"]},
             "warnings": [],
         }
 
@@ -310,10 +384,91 @@ class ExtractorTests(unittest.TestCase):
 
         loaded = np.load(npz_path)
         self.assertEqual(loaded["node_labels"].tolist(), [25])
+        self.assertEqual(loaded["node_coordinates"].tolist(), [[1.2, 0.0, 0.0]])
         with open(json_path, "r", encoding="utf-8") as stream:
             saved_metadata = json.load(stream)
         self.assertEqual(saved_metadata["fields"], ["U"])
         self.assertEqual(saved_metadata["step"], "HARMONIC_RESPONSE")
+
+    def test_build_metadata_records_node_coordinates(self):
+        nodes = [
+            extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0)),
+            extractor.NodeRef("PART-1-1", 2, (1.0, 2.0, 3.0)),
+        ]
+        arrays = {
+            "frequencies": np.array([5.0]),
+            "node_labels": np.array([1, 2]),
+            "node_coordinates": np.array([[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]),
+        }
+        extraction_metadata = {
+            "array_shapes": {
+                "frequencies": [1],
+                "node_labels": [2],
+                "node_coordinates": [2, 3],
+            },
+            "array_layouts": {
+                "frequencies": ["frame"],
+                "node_labels": ["node"],
+                "node_coordinates": ["node", "coordinate"],
+            },
+            "field_outputs": {},
+            "warnings": [],
+        }
+
+        metadata = extractor.build_metadata(
+            "data/test1.odb",
+            "HARMONIC_RESPONSE",
+            [],
+            nodes,
+            arrays,
+            extraction_metadata,
+        )
+
+        self.assertEqual(metadata["nodes"][0]["coordinates"], [0.0, 0.0, 0.0])
+        self.assertEqual(metadata["nodes"][1]["coordinates"], [1.0, 2.0, 3.0])
+        self.assertEqual(metadata["array_layouts"]["node_coordinates"], ["node", "coordinate"])
+
+    def test_build_metadata_records_tool_and_command_provenance(self):
+        nodes = [extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0))]
+        arrays = {
+            "frequencies": np.array([5.0]),
+            "node_labels": np.array([1]),
+            "node_coordinates": np.array([[0.0, 0.0, 0.0]]),
+        }
+        extraction_metadata = {
+            "array_shapes": {
+                "frequencies": [1],
+                "node_labels": [1],
+                "node_coordinates": [1, 3],
+            },
+            "array_layouts": {
+                "frequencies": ["frame"],
+                "node_labels": ["node"],
+                "node_coordinates": ["node", "coordinate"],
+            },
+            "field_outputs": {},
+            "warnings": [],
+        }
+
+        metadata = extractor.build_metadata(
+            "data/test1.odb",
+            "HARMONIC_RESPONSE",
+            ["U"],
+            nodes,
+            arrays,
+            extraction_metadata,
+            command_options={
+                "fields": ["U"],
+                "frequency_min": 5.0,
+                "frequency_max": 50.0,
+            },
+        )
+
+        self.assertEqual(metadata["tool"]["name"], "Extract_data_ODB.py")
+        self.assertEqual(metadata["tool"]["metadata_schema_version"], 1)
+        self.assertEqual(metadata["command_options"]["fields"], ["U"])
+        self.assertEqual(metadata["command_options"]["frequency_min"], 5.0)
+        self.assertEqual(metadata["command_options"]["frequency_max"], 50.0)
 
 
 if __name__ == "__main__":

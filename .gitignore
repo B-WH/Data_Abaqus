@@ -30,3 +30,7 @@ output/
 .idea/
 Thumbs.db
 Desktop.ini
+
+dist
+build
+*.egg-info

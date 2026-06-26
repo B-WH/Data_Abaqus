@@ -24,9 +24,18 @@ UI_TEXT = {
     "odb_file": "ODB 文件",
     "npz_output": "NPZ 输出",
     "metadata_output": "元数据 JSON",
+    "points_file": "目标点 CSV",
+    "point_output": "目标点输出 CSV",
+    "point_fields": "目标点字段",
+    "neighbors": "邻近点数量",
+    "exact_tol": "精确命中容差",
     "abaqus_command": "Abaqus 命令",
     "extractor_script": "提取脚本",
     "manual_fields": "手动字段",
+    "instance_filter": "实例过滤",
+    "node_label_filter": "节点编号",
+    "frequency_min": "频率下限",
+    "frequency_max": "频率上限",
     "refresh_fields": "读取场输出",
     "available_fields": "可用场输出",
     "field_hint": "请选择 ODB 文件以读取场输出。",
@@ -35,6 +44,8 @@ UI_TEXT = {
     "select_odb_title": "选择 Abaqus ODB 文件",
     "select_npz_title": "选择 NPZ 输出文件",
     "select_metadata_title": "选择元数据 JSON 输出文件",
+    "select_points_title": "选择目标点 CSV 文件",
+    "select_point_output_title": "选择目标点输出 CSV 文件",
     "select_script_title": "选择 Extract_data_ODB.py",
     "no_fields_found": "未找到场输出。",
     "found_fields": "已在 Step {step} 中找到 {count} 个场输出。",
@@ -52,13 +63,26 @@ UI_TEXT = {
     "missing_script_message": "未找到提取脚本。",
     "no_fields_selected_title": "未选择场输出",
     "no_fields_selected_message": "请至少勾选一个场输出。",
-    "starting_extraction": "开始提取。",
+    "invalid_node_labels_title": "节点编号格式错误",
+    "invalid_node_labels_message": "节点编号只能填写整数，可用空格、逗号或分号分隔。",
+    "invalid_frequency_title": "频率范围格式错误",
+    "invalid_frequency_message": "频率上下限必须是数字，或留空。",
+    "invalid_neighbors_title": "邻近点数量格式错误",
+    "invalid_neighbors_message": "邻近点数量必须是正整数。",
+    "invalid_exact_tol_title": "精确命中容差格式错误",
+    "invalid_exact_tol_message": "精确命中容差必须是数字，或留空。",
+    "starting_extraction": "开始 ODB 数据提取。",
+    "starting_point_export": "开始目标点数据导出。",
+    "point_export_finished_log": "目标点数据导出完成：{path}",
     "extraction_failed_title": "提取失败",
     "extraction_finished_log": "提取完成。",
     "extraction_finished_title": "提取完成",
     "extraction_finished_message": "ODB 数据提取完成。",
     "extraction_exit_code_log": "提取失败，退出代码为 {code}。",
     "extraction_exit_code_message": "Abaqus 退出代码为 {code}。请检查日志输出。",
+    "select_all_fields": "全选",
+    "clear_all_fields": "全不选",
+    "select_default_fields": "默认字段",
 }
 
 
@@ -71,6 +95,29 @@ def parse_args(argv=None):
     parser.add_argument("--metadata", help="Optional metadata JSON output path.")
     parser.add_argument("--step", help="Optional Abaqus step name.")
     parser.add_argument("--fields", nargs="+", help="Optional field names, e.g. U V A.")
+    parser.add_argument("--instances", nargs="+", help="Optional instance names to include.")
+    parser.add_argument("--node-labels", nargs="+", help="Optional node labels to include.")
+    parser.add_argument("--frequency-min", type=float, help="Optional minimum frame frequency.")
+    parser.add_argument("--frequency-max", type=float, help="Optional maximum frame frequency.")
+    parser.add_argument("--points", help="Optional point CSV with point_id,x,y,z columns.")
+    parser.add_argument("--point-output", help="Optional interpolated point CSV output path.")
+    parser.add_argument(
+        "--point-fields",
+        nargs="+",
+        help="Optional node field names for point interpolation. Defaults to all node fields.",
+    )
+    parser.add_argument(
+        "--neighbors",
+        type=int,
+        default=4,
+        help="Neighbor count for point interpolation.",
+    )
+    parser.add_argument(
+        "--exact-tol",
+        type=float,
+        default=1.0e-9,
+        help="Distance tolerance for exact node hits.",
+    )
     parser.add_argument(
         "--abaqus-command",
         help="Abaqus command or .bat path. Defaults to ABAQUS_COMMAND, abaqus, or abq20xx.",
@@ -84,16 +131,47 @@ def parse_args(argv=None):
 
 
 def default_extractor_script():
-    if getattr(sys, "frozen", False):
-        base_dir = os.path.dirname(sys.executable)
-    else:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+    base_dir = getattr(
+        sys,
+        "_MEIPASS",
+        os.path.dirname(os.path.abspath(__file__)),
+    )
     return os.path.join(base_dir, "Extract_data_ODB.py")
 
 
 def parse_field_text(field_text):
     fields = [part for part in re.split(r"[\s,;]+", field_text.strip()) if part]
     return fields or None
+
+
+def parse_node_label_text(label_text):
+    labels = []
+    for part in re.split(r"[\s,;]+", label_text.strip()):
+        if not part:
+            continue
+        labels.append(int(part))
+    return labels or None
+
+
+def parse_optional_float(value_text):
+    value_text = value_text.strip()
+    if not value_text:
+        return None
+    return float(value_text)
+
+
+def choose_field_names(fields, mode, default_fields=None):
+    fields = sorted(fields)
+    if mode == "all":
+        return fields
+    if mode == "none":
+        return []
+    if mode == "default":
+        if default_fields is None:
+            default_fields = parse_field_text(DEFAULT_FIELD_TEXT) or []
+        defaults = set(default_fields)
+        return [field_name for field_name in fields if field_name in defaults]
+    raise ValueError("Unknown field selection mode: {}".format(mode))
 
 
 def default_output_paths(odb_path, output_dir=None):
@@ -103,6 +181,12 @@ def default_output_paths(odb_path, output_dir=None):
         os.path.join(output_dir, "{}_point_data.npz".format(base_name)),
         os.path.join(output_dir, "{}_point_metadata.json".format(base_name)),
     )
+
+
+def default_point_output_path(odb_path, output_dir=None):
+    output_dir = output_dir or os.path.join(os.getcwd(), "output")
+    base_name = os.path.splitext(os.path.basename(odb_path))[0]
+    return os.path.join(output_dir, "{}_interpolated_points.csv".format(base_name))
 
 
 def find_abaqus_command(explicit_command=None, env=None, which=None):
@@ -150,6 +234,10 @@ def build_extraction_command(
     metadata_path=None,
     step_name=None,
     fields=None,
+    instances=None,
+    node_labels=None,
+    frequency_min=None,
+    frequency_max=None,
 ):
     command = [abaqus_command, "python", script_path, "--odb", odb_path]
     if output_path:
@@ -161,6 +249,16 @@ def build_extraction_command(
     if fields:
         command.append("--fields")
         command.extend(fields)
+    if instances:
+        command.append("--instances")
+        command.extend(instances)
+    if node_labels:
+        command.append("--node-labels")
+        command.extend(str(label) for label in node_labels)
+    if frequency_min is not None:
+        command.extend(["--frequency-min", str(frequency_min)])
+    if frequency_max is not None:
+        command.extend(["--frequency-max", str(frequency_max)])
     return command
 
 
@@ -246,6 +344,10 @@ def run_extraction(
     metadata_path=None,
     step_name=None,
     fields=None,
+    instances=None,
+    node_labels=None,
+    frequency_min=None,
+    frequency_max=None,
     runner=None,
     verbose=True,
     log_callback=None,
@@ -259,6 +361,10 @@ def run_extraction(
         metadata_path=metadata_path,
         step_name=step_name,
         fields=fields,
+        instances=instances,
+        node_labels=node_labels,
+        frequency_min=frequency_min,
+        frequency_max=frequency_max,
     )
     if verbose:
         print(
@@ -271,6 +377,81 @@ def run_extraction(
         return runner(command, log_callback=log_callback)
     except TypeError:
         return runner(command)
+
+
+def _default_point_runner(**kwargs):
+    import interpolate_odb_points
+
+    return interpolate_odb_points.interpolate_files(**kwargs)
+
+
+def run_workflow(
+    abaqus_command,
+    script_path,
+    odb_path,
+    output_path=None,
+    metadata_path=None,
+    step_name=None,
+    fields=None,
+    instances=None,
+    node_labels=None,
+    frequency_min=None,
+    frequency_max=None,
+    points_path=None,
+    point_output_path=None,
+    point_fields=None,
+    neighbors=4,
+    exact_tol=1.0e-9,
+    extraction_runner=None,
+    point_runner=None,
+    verbose=True,
+    log_callback=None,
+):
+    if points_path:
+        default_npz, default_metadata = default_output_paths(odb_path)
+        output_path = output_path or default_npz
+        metadata_path = metadata_path or default_metadata
+        point_output_path = point_output_path or default_point_output_path(odb_path)
+
+    if log_callback:
+        log_callback(UI_TEXT["starting_extraction"])
+
+    extraction_runner = run_extraction if extraction_runner is None else extraction_runner
+    code = extraction_runner(
+        abaqus_command=abaqus_command,
+        script_path=script_path,
+        odb_path=odb_path,
+        output_path=output_path,
+        metadata_path=metadata_path,
+        step_name=step_name,
+        fields=fields,
+        instances=instances,
+        node_labels=node_labels,
+        frequency_min=frequency_min,
+        frequency_max=frequency_max,
+        verbose=verbose,
+        log_callback=log_callback,
+    )
+    if code != 0 or not points_path:
+        return code
+
+    if log_callback:
+        log_callback(UI_TEXT["starting_point_export"])
+
+    point_runner = _default_point_runner if point_runner is None else point_runner
+    point_runner(
+        data_path=output_path,
+        metadata_path=metadata_path,
+        points_path=points_path,
+        output_path=point_output_path,
+        fields=point_fields,
+        neighbors=neighbors,
+        exact_tol=exact_tol,
+    )
+
+    if log_callback:
+        log_callback(UI_TEXT["point_export_finished_log"].format(path=point_output_path))
+    return 0
 
 
 def run_cli(argv=None):
@@ -295,7 +476,7 @@ def run_cli(argv=None):
         print("ERROR: Extractor script not found: {}".format(script_path), file=sys.stderr)
         return 2
 
-    return run_extraction(
+    return run_workflow(
         abaqus_command=abaqus_command,
         script_path=script_path,
         odb_path=odb_path,
@@ -303,6 +484,15 @@ def run_cli(argv=None):
         metadata_path=args.metadata,
         step_name=args.step,
         fields=args.fields,
+        instances=args.instances,
+        node_labels=args.node_labels,
+        frequency_min=args.frequency_min,
+        frequency_max=args.frequency_max,
+        points_path=args.points,
+        point_output_path=args.point_output,
+        point_fields=args.point_fields,
+        neighbors=args.neighbors,
+        exact_tol=args.exact_tol,
     )
 
 
@@ -313,14 +503,23 @@ class ExtractOdbApp(object):
         self.tk = tk
         self.root = root
         self.root.title(UI_TEXT["window_title"])
-        self.root.geometry("820x560")
-        self.root.minsize(720, 500)
+        self.root.geometry("880x720")
+        self.root.minsize(760, 620)
 
         self.odb_var = tk.StringVar()
         self.output_var = tk.StringVar()
         self.metadata_var = tk.StringVar()
+        self.points_var = tk.StringVar()
+        self.point_output_var = tk.StringVar()
+        self.point_fields_var = tk.StringVar()
+        self.neighbors_var = tk.StringVar(value="4")
+        self.exact_tol_var = tk.StringVar(value="1e-9")
         self.step_var = tk.StringVar()
         self.fields_var = tk.StringVar(value=DEFAULT_FIELD_TEXT)
+        self.instances_var = tk.StringVar()
+        self.node_labels_var = tk.StringVar()
+        self.frequency_min_var = tk.StringVar()
+        self.frequency_max_var = tk.StringVar()
         self.abaqus_var = tk.StringVar(value=find_abaqus_command() or "")
         self.script_var = tk.StringVar(value=default_extractor_script())
         self.status_var = tk.StringVar(value=UI_TEXT["ready"])
@@ -339,46 +538,150 @@ class ExtractOdbApp(object):
         frame = ttk.Frame(self.root, padding=12)
         frame.grid(row=0, column=0, sticky="nsew")
         frame.columnconfigure(1, weight=1)
-        frame.rowconfigure(9, weight=1)
+        frame.rowconfigure(17, weight=1)
 
         self._add_path_row(frame, 0, UI_TEXT["odb_file"], self.odb_var, self.choose_odb)
         self._add_path_row(frame, 1, UI_TEXT["npz_output"], self.output_var, self.choose_output)
         self._add_path_row(
             frame, 2, UI_TEXT["metadata_output"], self.metadata_var, self.choose_metadata
         )
-        self._add_path_row(frame, 3, UI_TEXT["abaqus_command"], self.abaqus_var, None)
-        self._add_path_row(frame, 4, UI_TEXT["extractor_script"], self.script_var, self.choose_script)
+        self._add_path_row(frame, 3, UI_TEXT["points_file"], self.points_var, self.choose_points)
+        self._add_path_row(
+            frame,
+            4,
+            UI_TEXT["point_output"],
+            self.point_output_var,
+            self.choose_point_output,
+        )
+        self._add_path_row(frame, 5, UI_TEXT["abaqus_command"], self.abaqus_var, None)
+        self._add_path_row(frame, 6, UI_TEXT["extractor_script"], self.script_var, self.choose_script)
 
-        ttk.Label(frame, text="Step").grid(row=5, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Step").grid(row=7, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.step_var).grid(
-            row=5, column=1, columnspan=2, sticky="ew", pady=4
+            row=7, column=1, columnspan=2, sticky="ew", pady=4
         )
 
-        ttk.Label(frame, text=UI_TEXT["manual_fields"]).grid(row=6, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text=UI_TEXT["manual_fields"]).grid(row=8, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.fields_var).grid(
-            row=6, column=1, sticky="ew", pady=4, padx=(0, 6)
+            row=8, column=1, sticky="ew", pady=4, padx=(0, 6)
         )
         self.refresh_button = ttk.Button(
             frame, text=UI_TEXT["refresh_fields"], command=self.refresh_fields
         )
-        self.refresh_button.grid(row=6, column=2, sticky="ew", pady=4)
+        self.refresh_button.grid(row=8, column=2, sticky="ew", pady=4)
+
+        ttk.Label(frame, text=UI_TEXT["instance_filter"]).grid(row=9, column=0, sticky="w", pady=4)
+        ttk.Entry(frame, textvariable=self.instances_var).grid(
+            row=9, column=1, columnspan=2, sticky="ew", pady=4
+        )
+
+        ttk.Label(frame, text=UI_TEXT["node_label_filter"]).grid(
+            row=10, column=0, sticky="w", pady=4
+        )
+        ttk.Entry(frame, textvariable=self.node_labels_var).grid(
+            row=10, column=1, columnspan=2, sticky="ew", pady=4
+        )
+
+        ttk.Label(frame, text=UI_TEXT["frequency_min"]).grid(row=11, column=0, sticky="w", pady=4)
+        frequency_frame = ttk.Frame(frame)
+        frequency_frame.grid(row=11, column=1, columnspan=2, sticky="ew", pady=4)
+        frequency_frame.columnconfigure(0, weight=1)
+        frequency_frame.columnconfigure(2, weight=1)
+        ttk.Entry(frequency_frame, textvariable=self.frequency_min_var).grid(
+            row=0, column=0, sticky="ew"
+        )
+        ttk.Label(frequency_frame, text=UI_TEXT["frequency_max"]).grid(
+            row=0, column=1, padx=8
+        )
+        ttk.Entry(frequency_frame, textvariable=self.frequency_max_var).grid(
+            row=0, column=2, sticky="ew"
+        )
+
+        ttk.Label(frame, text=UI_TEXT["point_fields"]).grid(row=12, column=0, sticky="w", pady=4)
+        ttk.Entry(frame, textvariable=self.point_fields_var).grid(
+            row=12, column=1, columnspan=2, sticky="ew", pady=4
+        )
+
+        ttk.Label(frame, text=UI_TEXT["neighbors"]).grid(row=13, column=0, sticky="w", pady=4)
+        point_options_frame = ttk.Frame(frame)
+        point_options_frame.grid(row=13, column=1, columnspan=2, sticky="ew", pady=4)
+        point_options_frame.columnconfigure(0, weight=1)
+        point_options_frame.columnconfigure(2, weight=1)
+        ttk.Entry(point_options_frame, textvariable=self.neighbors_var).grid(
+            row=0, column=0, sticky="ew"
+        )
+        ttk.Label(point_options_frame, text=UI_TEXT["exact_tol"]).grid(
+            row=0, column=1, padx=8
+        )
+        ttk.Entry(point_options_frame, textvariable=self.exact_tol_var).grid(
+            row=0, column=2, sticky="ew"
+        )
 
         self.field_box = ttk.LabelFrame(frame, text=UI_TEXT["available_fields"])
-        self.field_box.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(4, 8))
+        self.field_box.grid(row=14, column=0, columnspan=3, sticky="ew", pady=(4, 8))
         self.field_box.columnconfigure(0, weight=1)
-        self.field_hint = ttk.Label(self.field_box, text=UI_TEXT["field_hint"])
+        self.field_box.rowconfigure(1, weight=1)
+
+        field_toolbar = ttk.Frame(self.field_box)
+        field_toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2))
+        self.field_selection_buttons = [
+            ttk.Button(
+                field_toolbar,
+                text=UI_TEXT["select_all_fields"],
+                command=lambda: self._set_field_selection("all"),
+            ),
+            ttk.Button(
+                field_toolbar,
+                text=UI_TEXT["clear_all_fields"],
+                command=lambda: self._set_field_selection("none"),
+            ),
+            ttk.Button(
+                field_toolbar,
+                text=UI_TEXT["select_default_fields"],
+                command=lambda: self._set_field_selection("default"),
+            ),
+        ]
+        for button in self.field_selection_buttons:
+            button.pack(side="left", padx=(0, 6))
+
+        self.field_canvas = tk.Canvas(
+            self.field_box,
+            height=120,
+            highlightthickness=0,
+        )
+        self.field_canvas.grid(row=1, column=0, sticky="nsew", padx=(6, 0), pady=(2, 6))
+        field_scrollbar = ttk.Scrollbar(
+            self.field_box,
+            orient="vertical",
+            command=self.field_canvas.yview,
+        )
+        field_scrollbar.grid(row=1, column=1, sticky="ns", padx=(0, 6), pady=(2, 6))
+        self.field_canvas.configure(yscrollcommand=field_scrollbar.set)
+
+        self.field_checks_frame = ttk.Frame(self.field_canvas)
+        self.field_canvas_window = self.field_canvas.create_window(
+            (0, 0),
+            window=self.field_checks_frame,
+            anchor="nw",
+        )
+        self.field_checks_frame.bind("<Configure>", self._update_field_scroll_region)
+        self.field_canvas.bind("<Configure>", self._resize_field_checks_frame)
+        self.field_hint = ttk.Label(
+            self.field_checks_frame,
+            text=UI_TEXT["field_hint"],
+        )
         self.field_hint.grid(row=0, column=0, sticky="w", padx=8, pady=8)
 
         button_bar = ttk.Frame(frame)
-        button_bar.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 6))
+        button_bar.grid(row=15, column=0, columnspan=3, sticky="ew", pady=(8, 6))
         self.run_button = ttk.Button(button_bar, text=UI_TEXT["run_button"], command=self.run)
         self.run_button.pack(side="left")
         ttk.Label(button_bar, textvariable=self.status_var).pack(side="left", padx=12)
 
         self.log_text = tk.Text(frame, height=12, wrap="word")
-        self.log_text.grid(row=9, column=0, columnspan=3, sticky="nsew")
+        self.log_text.grid(row=17, column=0, columnspan=3, sticky="nsew")
         scrollbar = ttk.Scrollbar(frame, command=self.log_text.yview)
-        scrollbar.grid(row=9, column=3, sticky="ns")
+        scrollbar.grid(row=17, column=3, sticky="ns")
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
     def _add_path_row(self, frame, row, label, variable, command):
@@ -409,6 +712,8 @@ class ExtractOdbApp(object):
             output_path, metadata_path = default_output_paths(path)
             self.output_var.set(output_path)
             self.metadata_var.set(metadata_path)
+        if not self.point_output_var.get().strip():
+            self.point_output_var.set(default_point_output_path(path))
         self.refresh_fields()
 
     def choose_output(self):
@@ -443,6 +748,36 @@ class ExtractOdbApp(object):
         if path:
             self.metadata_var.set(path)
 
+    def choose_points(self):
+        from tkinter import filedialog
+
+        path = filedialog.askopenfilename(
+            title=UI_TEXT["select_points_title"],
+            filetypes=(("CSV", "*.csv"), ("All files", "*.*")),
+        )
+        if path:
+            self.points_var.set(path)
+            if not self.point_output_var.get().strip():
+                self.point_output_var.set(
+                    default_point_output_path(self.odb_var.get().strip() or path)
+                )
+
+    def choose_point_output(self):
+        from tkinter import filedialog
+
+        initial = self.point_output_var.get().strip() or default_point_output_path(
+            self.odb_var.get().strip() or "odb"
+        )
+        path = filedialog.asksaveasfilename(
+            title=UI_TEXT["select_point_output_title"],
+            defaultextension=".csv",
+            initialfile=os.path.basename(initial),
+            initialdir=os.path.dirname(initial) or os.getcwd(),
+            filetypes=(("CSV", "*.csv"), ("All files", "*.*")),
+        )
+        if path:
+            self.point_output_var.set(path)
+
     def choose_script(self):
         from tkinter import filedialog
 
@@ -464,12 +799,26 @@ class ExtractOdbApp(object):
         self._running = running
         self.run_button.configure(state="disabled" if running else "normal")
         self.refresh_button.configure(state="disabled" if running else "normal")
+        for button in self.field_selection_buttons:
+            button.configure(state="disabled" if running else "normal")
         self.status_var.set(UI_TEXT["running"] if running else UI_TEXT["ready"])
 
+    def _update_field_scroll_region(self, _event=None):
+        self.field_canvas.configure(scrollregion=self.field_canvas.bbox("all"))
+
+    def _resize_field_checks_frame(self, event):
+        self.field_canvas.itemconfigure(self.field_canvas_window, width=event.width)
+
     def _clear_field_checks(self):
-        for child in self.field_box.winfo_children():
+        for child in self.field_checks_frame.winfo_children():
             child.destroy()
         self.field_vars = {}
+
+    def _set_field_selection(self, mode):
+        selected = set(choose_field_names(self.field_vars.keys(), mode))
+        for field_name, variable in self.field_vars.items():
+            variable.set(field_name in selected)
+        self._sync_fields_from_checks()
 
     def _sync_fields_from_checks(self):
         selected = [
@@ -486,7 +835,7 @@ class ExtractOdbApp(object):
         fields = metadata.get("fields", [])
         self._clear_field_checks()
         if not fields:
-            ttk.Label(self.field_box, text=UI_TEXT["no_fields_found"]).grid(
+            ttk.Label(self.field_checks_frame, text=UI_TEXT["no_fields_found"]).grid(
                 row=0, column=0, sticky="w", padx=8, pady=8
             )
             self.fields_var.set("")
@@ -500,7 +849,7 @@ class ExtractOdbApp(object):
             variable = tk.BooleanVar(value=checked)
             self.field_vars[field_name] = variable
             ttk.Checkbutton(
-                self.field_box,
+                self.field_checks_frame,
                 text=field_name,
                 variable=variable,
                 command=self._sync_fields_from_checks,
@@ -510,6 +859,7 @@ class ExtractOdbApp(object):
             for variable in self.field_vars.values():
                 variable.set(True)
         self._sync_fields_from_checks()
+        self.field_canvas.yview_moveto(0)
         self.log(UI_TEXT["found_fields"].format(step=metadata.get("step", ""), count=len(fields)))
 
     def refresh_fields(self):
@@ -601,9 +951,48 @@ class ExtractOdbApp(object):
                 UI_TEXT["no_fields_selected_message"],
             )
             return None
+        try:
+            node_labels = parse_node_label_text(self.node_labels_var.get())
+        except ValueError:
+            messagebox.showerror(
+                UI_TEXT["invalid_node_labels_title"],
+                UI_TEXT["invalid_node_labels_message"],
+            )
+            return None
+        try:
+            frequency_min = parse_optional_float(self.frequency_min_var.get())
+            frequency_max = parse_optional_float(self.frequency_max_var.get())
+        except ValueError:
+            messagebox.showerror(
+                UI_TEXT["invalid_frequency_title"],
+                UI_TEXT["invalid_frequency_message"],
+            )
+            return None
+        try:
+            neighbors = int(self.neighbors_var.get().strip() or "4")
+            if neighbors < 1:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                UI_TEXT["invalid_neighbors_title"],
+                UI_TEXT["invalid_neighbors_message"],
+            )
+            return None
+        try:
+            exact_tol = parse_optional_float(self.exact_tol_var.get())
+        except ValueError:
+            messagebox.showerror(
+                UI_TEXT["invalid_exact_tol_title"],
+                UI_TEXT["invalid_exact_tol_message"],
+            )
+            return None
+        instances = parse_field_text(self.instances_var.get())
         output_path = self.output_var.get().strip() or None
         metadata_path = self.metadata_var.get().strip() or None
         step_name = self.step_var.get().strip() or None
+        points_path = self.points_var.get().strip() or None
+        point_output_path = self.point_output_var.get().strip() or None
+        point_fields = parse_field_text(self.point_fields_var.get())
         return {
             "abaqus_command": abaqus_command,
             "script_path": script_path,
@@ -612,6 +1001,15 @@ class ExtractOdbApp(object):
             "metadata_path": metadata_path,
             "step_name": step_name,
             "fields": fields,
+            "instances": instances,
+            "node_labels": node_labels,
+            "frequency_min": frequency_min,
+            "frequency_max": frequency_max,
+            "points_path": points_path,
+            "point_output_path": point_output_path,
+            "point_fields": point_fields,
+            "neighbors": neighbors,
+            "exact_tol": exact_tol if exact_tol is not None else 1.0e-9,
         }
 
     def run(self):
@@ -621,7 +1019,6 @@ class ExtractOdbApp(object):
         if options is None:
             return
 
-        self.log(UI_TEXT["starting_extraction"])
         self._set_running(True)
         worker = threading.Thread(target=self._run_worker, args=(options,))
         worker.daemon = True
@@ -631,7 +1028,7 @@ class ExtractOdbApp(object):
         from tkinter import messagebox
 
         try:
-            code = run_extraction(
+            code = run_workflow(
                 verbose=False,
                 log_callback=self._thread_log,
                 **options

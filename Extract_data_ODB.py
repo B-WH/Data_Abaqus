@@ -19,8 +19,10 @@ DEFAULT_ODB = os.path.join("data", "test1.odb")
 DEFAULT_OUTPUT = os.path.join("output", "test1_point_data.npz")
 DEFAULT_METADATA = os.path.join("output", "test1_point_metadata.json")
 DEFAULT_FIELDS = ("U", "UR", "V", "VR", "A", "AR")
+TOOL_NAME = "Extract_data_ODB.py"
+METADATA_SCHEMA_VERSION = 1
 
-NodeRef = namedtuple("NodeRef", ["instance_name", "label"])
+NodeRef = namedtuple("NodeRef", ["instance_name", "label", "coordinates"])
 
 
 class OdbAccessUnavailableError(RuntimeError):
@@ -46,6 +48,30 @@ def parse_args(argv=None):
         nargs="+",
         default=list(DEFAULT_FIELDS),
         help="Field output names to extract.",
+    )
+    parser.add_argument(
+        "--instances",
+        nargs="+",
+        default=None,
+        help="Optional instance names to include.",
+    )
+    parser.add_argument(
+        "--node-labels",
+        nargs="+",
+        default=None,
+        help="Optional node labels to include. Accepts spaces or comma-separated values.",
+    )
+    parser.add_argument(
+        "--frequency-min",
+        type=float,
+        default=None,
+        help="Optional minimum frame frequency.",
+    )
+    parser.add_argument(
+        "--frequency-max",
+        type=float,
+        default=None,
+        help="Optional maximum frame frequency.",
     )
     parser.add_argument(
         "--list-fields",
@@ -77,12 +103,35 @@ def ensure_parent_dir(path):
         os.makedirs(parent)
 
 
-def collect_nodes(odb):
+def parse_node_label_values(values):
+    if not values:
+        return None
+    labels = []
+    for value in values:
+        for part in str(value).replace(",", " ").replace(";", " ").split():
+            labels.append(int(part))
+    return labels or None
+
+
+def _node_coordinates(node):
+    coordinates = [float(value) for value in getattr(node, "coordinates", ())]
+    if len(coordinates) < 3:
+        coordinates.extend([0.0] * (3 - len(coordinates)))
+    return tuple(coordinates[:3])
+
+
+def collect_nodes(odb, instances=None, node_labels=None):
+    instance_filter = set(instances or [])
+    node_label_filter = set(int(label) for label in (node_labels or []))
     nodes = []
     for instance_name in sorted(odb.rootAssembly.instances.keys()):
+        if instance_filter and instance_name not in instance_filter:
+            continue
         instance = odb.rootAssembly.instances[instance_name]
         for node in instance.nodes:
-            nodes.append(NodeRef(instance_name, int(node.label)))
+            if node_label_filter and int(node.label) not in node_label_filter:
+                continue
+            nodes.append(NodeRef(instance_name, int(node.label), _node_coordinates(node)))
     return sorted(nodes, key=lambda item: (item.instance_name, item.label))
 
 
@@ -146,6 +195,19 @@ def _component_count_for_field(step, field_name):
         for value in _get_field_values(frame.fieldOutputs[field_name]):
             component_count = max(component_count, len(_value_data_tuple(value.data)))
     return component_count
+
+
+def _component_labels_for_field(step, field_name, component_count):
+    for frame in step.frames:
+        if field_name not in frame.fieldOutputs:
+            continue
+        labels = getattr(frame.fieldOutputs[field_name], "componentLabels", None)
+        if labels and len(labels) == component_count:
+            return [str(label) for label in labels]
+
+    if component_count == 1:
+        return [field_name]
+    return ["component_{}".format(index + 1) for index in range(component_count)]
 
 
 def _get_field_values(field):
@@ -238,22 +300,54 @@ def _field_point_metadata(key):
     return {"instance": key[1], "value_index": int(key[2])}
 
 
-def extract_field_arrays(step, nodes, fields):
+def _array_layout_for_location(location):
+    if location == "NODE":
+        return ["frame", "node", "component"]
+    if location == "ELEMENT":
+        return ["frame", "element_point", "component"]
+    return ["frame", "value", "component"]
+
+
+def _filter_frames_by_frequency(frames, frequency_min=None, frequency_max=None):
+    filtered_frames = []
+    for frame in frames:
+        frequency = float(frame.frameValue)
+        if frequency_min is not None and frequency < frequency_min:
+            continue
+        if frequency_max is not None and frequency > frequency_max:
+            continue
+        filtered_frames.append(frame)
+    return filtered_frames
+
+
+def extract_field_arrays(step, nodes, fields, frequency_min=None, frequency_max=None):
     np = _numpy()
-    frames = list(step.frames)
+    frames = _filter_frames_by_frequency(
+        list(step.frames),
+        frequency_min=frequency_min,
+        frequency_max=frequency_max,
+    )
     frequencies = np.asarray([float(frame.frameValue) for frame in frames], dtype=float)
     node_labels = np.asarray([node.label for node in nodes], dtype=np.int64)
+    node_coordinates = np.asarray([node.coordinates for node in nodes], dtype=float)
     default_component_count = _component_count_from_step(step, fields)
     warnings = []
 
     arrays = {
         "frequencies": frequencies,
         "node_labels": node_labels,
+        "node_coordinates": node_coordinates,
     }
     metadata = {
         "array_shapes": {
             "frequencies": list(frequencies.shape),
             "node_labels": list(node_labels.shape),
+            "node_coordinates": list(node_coordinates.shape),
+        },
+        "array_layouts": {
+            "frequencies": ["frame"],
+            "node_labels": ["node"],
+            "node_coordinates": ["node", "coordinate"],
         },
         "field_outputs": {},
         "warnings": warnings,
@@ -262,8 +356,12 @@ def extract_field_arrays(step, nodes, fields):
     for field_name in fields:
         location = _field_location_from_step(step, field_name)
         point_keys = _collect_field_point_keys(step, field_name, nodes, location)
-        point_index = dict((key, index) for index, key in enumerate(point_keys))
+        point_index = {}  # type: dict
+        for index, point_key in enumerate(point_keys):
+            point_index[point_key] = index
         component_count = _component_count_for_field(step, field_name) or default_component_count
+        components = _component_labels_for_field(step, field_name, component_count)
+        array_layout = _array_layout_for_location(location)
         real_key = "{}_real".format(field_name)
         imag_key = "{}_imag".format(field_name)
         real_data = np.full(
@@ -309,9 +407,13 @@ def extract_field_arrays(step, nodes, fields):
         arrays[imag_key] = imag_data
         metadata["array_shapes"][real_key] = list(real_data.shape)
         metadata["array_shapes"][imag_key] = list(imag_data.shape)
+        metadata["array_layouts"][real_key] = list(array_layout)
+        metadata["array_layouts"][imag_key] = list(array_layout)
         metadata["field_outputs"][field_name] = {
             "location": location,
             "component_count": int(component_count),
+            "components": components,
+            "array_layout": array_layout,
             "points": [_field_point_metadata(key) for key in point_keys],
         }
 
@@ -330,20 +432,44 @@ def save_metadata(metadata_path, metadata):
         json.dump(metadata, stream, ensure_ascii=False, indent=2, sort_keys=True)
 
 
-def build_metadata(odb_path, step_name, fields, nodes, arrays, extraction_metadata):
+def build_metadata(
+    odb_path,
+    step_name,
+    fields,
+    nodes,
+    arrays,
+    extraction_metadata,
+    filters=None,
+    command_options=None,
+):
     metadata = {
+        "tool": {
+            "name": TOOL_NAME,
+            "metadata_schema_version": METADATA_SCHEMA_VERSION,
+        },
         "source_odb": os.path.abspath(odb_path),
         "step": step_name,
         "fields": list(fields),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "node_count": len(nodes),
         "nodes": [
-            {"instance": node.instance_name, "label": int(node.label)} for node in nodes
+            {
+                "instance": node.instance_name,
+                "label": int(node.label),
+                "coordinates": [float(value) for value in node.coordinates],
+            }
+            for node in nodes
         ],
         "node_labels": [int(label) for label in arrays["node_labels"].tolist()],
+        "node_coordinates": [
+            [float(value) for value in row] for row in arrays["node_coordinates"].tolist()
+        ],
         "frequencies": [float(value) for value in arrays["frequencies"].tolist()],
         "array_shapes": extraction_metadata["array_shapes"],
+        "array_layouts": extraction_metadata.get("array_layouts", {}),
         "field_outputs": extraction_metadata.get("field_outputs", {}),
+        "filters": filters or {},
+        "command_options": dict(command_options or {}),
         "warnings": extraction_metadata["warnings"],
     }
     return metadata
@@ -354,10 +480,45 @@ def run(args):
     try:
         step_name = choose_step_name(odb, args.step)
         step = odb.steps[step_name]
-        nodes = collect_nodes(odb)
-        arrays, extraction_metadata = extract_field_arrays(step, nodes, args.fields)
+        node_labels = parse_node_label_values(args.node_labels)
+        nodes = collect_nodes(
+            odb,
+            instances=args.instances,
+            node_labels=node_labels,
+        )
+        arrays, extraction_metadata = extract_field_arrays(
+            step,
+            nodes,
+            args.fields,
+            frequency_min=args.frequency_min,
+            frequency_max=args.frequency_max,
+        )
+        filters = {
+            "instances": list(args.instances or []),
+            "node_labels": list(node_labels or []),
+            "frequency_min": args.frequency_min,
+            "frequency_max": args.frequency_max,
+        }
+        command_options = {
+            "odb": args.odb,
+            "output": args.output,
+            "metadata": args.metadata,
+            "step": args.step,
+            "fields": list(args.fields or []),
+            "instances": list(args.instances or []),
+            "node_labels": list(node_labels or []),
+            "frequency_min": args.frequency_min,
+            "frequency_max": args.frequency_max,
+        }
         metadata = build_metadata(
-            args.odb, step_name, args.fields, nodes, arrays, extraction_metadata
+            args.odb,
+            step_name,
+            args.fields,
+            nodes,
+            arrays,
+            extraction_metadata,
+            filters=filters,
+            command_options=command_options,
         )
         save_npz(args.output, arrays)
         save_metadata(args.metadata, metadata)
