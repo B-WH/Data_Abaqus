@@ -1,7 +1,7 @@
 """Extract nodal frequency-response data from an Abaqus ODB file.
 
 Run with Abaqus Python, for example:
-    abaqus python Extract_data_ODB.py --odb data\\test1.odb
+    abaqus python -m odb_extract.extractor --odb data\\test1.odb
 """
 
 from __future__ import print_function
@@ -19,7 +19,7 @@ DEFAULT_ODB = os.path.join("data", "test1.odb")
 DEFAULT_OUTPUT = os.path.join("output", "test1_point_data.npz")
 DEFAULT_METADATA = os.path.join("output", "test1_point_metadata.json")
 DEFAULT_FIELDS = ("U", "UR", "V", "VR", "A", "AR")
-TOOL_NAME = "Extract_data_ODB.py"
+TOOL_NAME = "odb_extract.extractor"
 METADATA_SCHEMA_VERSION = 1
 
 NodeRef = namedtuple("NodeRef", ["instance_name", "label", "coordinates"])
@@ -88,7 +88,7 @@ def open_odb_readonly(path):
         raise OdbAccessUnavailableError(
             "Abaqus module 'odbAccess' is not available in this Python environment. "
             "Run this script with Abaqus Python, for example: "
-            "abaqus python Extract_data_ODB.py --odb data\\test1.odb"
+            "abaqus python -m odb_extract.extractor --odb data\\test1.odb"
         ) from exc
     return odb_access.openOdb(path=path, readOnly=True)
 

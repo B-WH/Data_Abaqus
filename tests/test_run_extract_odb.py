@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest import mock
 
-import run_extract_odb as launcher
+from odb_extract import launcher
 
 
 class LauncherTests(unittest.TestCase):
@@ -13,10 +13,10 @@ class LauncherTests(unittest.TestCase):
         def get(self):
             return self.value
 
-    def test_build_extraction_command_includes_abaqus_python_script_and_options(self):
+    def test_build_extraction_command_includes_abaqus_python_module_and_options(self):
         command = launcher.build_extraction_command(
             abaqus_command="abq2024",
-            script_path=r"D:\work\Extract_data_ODB.py",
+            extractor_module="odb_extract.extractor",
             odb_path=r"D:\work\data\test1.odb",
             output_path=r"D:\work\output\data.npz",
             metadata_path=r"D:\work\output\meta.json",
@@ -33,7 +33,8 @@ class LauncherTests(unittest.TestCase):
             [
                 "abq2024",
                 "python",
-                r"D:\work\Extract_data_ODB.py",
+                "-m",
+                "odb_extract.extractor",
                 "--odb",
                 r"D:\work\data\test1.odb",
                 "--output",
@@ -60,19 +61,19 @@ class LauncherTests(unittest.TestCase):
     def test_build_extraction_command_omits_optional_arguments_when_not_set(self):
         command = launcher.build_extraction_command(
             abaqus_command="abaqus",
-            script_path="Extract_data_ODB.py",
+            extractor_module="odb_extract.extractor",
             odb_path="data/test1.odb",
         )
 
         self.assertEqual(
             command,
-            ["abaqus", "python", "Extract_data_ODB.py", "--odb", "data/test1.odb"],
+            ["abaqus", "python", "-m", "odb_extract.extractor", "--odb", "data/test1.odb"],
         )
 
     def test_build_field_list_command_includes_list_fields_flag(self):
         command = launcher.build_field_list_command(
             abaqus_command="abaqus",
-            script_path="Extract_data_ODB.py",
+            extractor_module="odb_extract.extractor",
             odb_path="data/test1.odb",
             step_name="Step-1",
         )
@@ -82,7 +83,8 @@ class LauncherTests(unittest.TestCase):
             [
                 "abaqus",
                 "python",
-                "Extract_data_ODB.py",
+                "-m",
+                "odb_extract.extractor",
                 "--odb",
                 "data/test1.odb",
                 "--list-fields",
@@ -125,7 +127,7 @@ class LauncherTests(unittest.TestCase):
 
         code = launcher.run_extraction(
             abaqus_command="abaqus",
-            script_path="Extract_data_ODB.py",
+            extractor_module="odb_extract.extractor",
             odb_path="data/test1.odb",
             output_path=None,
             metadata_path=None,
@@ -138,24 +140,17 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(code, 7)
         self.assertEqual(
             calls,
-            [["abaqus", "python", "Extract_data_ODB.py", "--odb", "data/test1.odb"]],
+            [["abaqus", "python", "-m", "odb_extract.extractor", "--odb", "data/test1.odb"]],
         )
 
-    def test_default_extractor_script_points_to_project_script(self):
-        script_path = launcher.default_extractor_script()
+    def test_default_extractor_module_points_to_package_module(self):
+        self.assertEqual(launcher.default_extractor_module(), "odb_extract.extractor")
 
-        self.assertEqual(os.path.basename(script_path), "Extract_data_ODB.py")
-
-    def test_default_extractor_script_uses_pyinstaller_bundle_directory(self):
-        bundle_dir = os.path.join("temporary", "pyinstaller_bundle")
-
-        with mock.patch.object(launcher.sys, "_MEIPASS", bundle_dir, create=True):
-            script_path = launcher.default_extractor_script()
-
-        self.assertEqual(
-            script_path,
-            os.path.join(bundle_dir, "Extract_data_ODB.py"),
-        )
+    def test_root_entrypoint_scripts_are_removed(self):
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        self.assertFalse(os.path.exists(os.path.join(project_root, "Extract_data_ODB.py")))
+        self.assertFalse(os.path.exists(os.path.join(project_root, "run_extract_odb.py")))
+        self.assertFalse(os.path.exists(os.path.join(project_root, "interpolate_odb_points.py")))
 
     def test_parse_field_text_accepts_commas_and_whitespace(self):
         self.assertEqual(
@@ -279,7 +274,7 @@ class LauncherTests(unittest.TestCase):
 
         code = launcher.run_workflow(
             abaqus_command="abaqus",
-            script_path="Extract_data_ODB.py",
+            extractor_module="odb_extract.extractor",
             odb_path=r"D:\work\data\test1.odb",
             output_path=r"D:\work\output\data.npz",
             metadata_path=r"D:\work\output\meta.json",
@@ -316,7 +311,7 @@ class LauncherTests(unittest.TestCase):
 
         code = launcher.run_workflow(
             abaqus_command="abaqus",
-            script_path="Extract_data_ODB.py",
+            extractor_module="odb_extract.extractor",
             odb_path="data/test1.odb",
             points_path="points.csv",
             extraction_runner=fake_extraction,
@@ -340,7 +335,7 @@ class LauncherTests(unittest.TestCase):
 
         code = launcher.run_workflow(
             abaqus_command="abaqus",
-            script_path="Extract_data_ODB.py",
+            extractor_module="odb_extract.extractor",
             odb_path=r"D:\work\data\test1.odb",
             output_path=None,
             metadata_path=None,
@@ -373,11 +368,9 @@ class LauncherTests(unittest.TestCase):
         app.neighbors_var = self.FakeVar("6")
         app.exact_tol_var = self.FakeVar("1e-8")
         app.abaqus_var = self.FakeVar("abaqus")
-        app.script_var = self.FakeVar("Extract_data_ODB.py")
         app.field_vars = {}
 
-        with mock.patch.object(launcher.os.path, "exists", return_value=True):
-            options = app._validate_inputs()
+        options = app._validate_inputs()
 
         self.assertEqual(options["points_path"], "points.csv")
         self.assertEqual(options["point_output_path"], "output/points.csv")

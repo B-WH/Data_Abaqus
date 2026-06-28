@@ -2,11 +2,11 @@
 
 
 a = Analysis(
-    ['run_extract_odb.py'],
+    ['odb_extract/__main__.py'],
     pathex=[],
     binaries=[],
-    datas=[('Extract_data_ODB.py', '.'), ('interpolate_odb_points.py', '.')],
-    hiddenimports=[],
+    datas=[],
+    hiddenimports=['odb_extract.extractor', 'odb_extract.interpolate_points'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

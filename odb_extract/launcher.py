@@ -1,4 +1,4 @@
-"""Launcher for Extract_data_ODB.py.
+"""Launcher for odb_extract.extractor.
 
 This script runs under normal Python. It delegates ODB reading to Abaqus Python.
 """
@@ -16,6 +16,7 @@ import threading
 
 
 ABAQUS_CANDIDATES = ("abaqus", "abq2024", "abq2023", "abq2022")
+DEFAULT_EXTRACTOR_MODULE = "odb_extract.extractor"
 DEFAULT_FIELD_TEXT = "U UR V VR A AR"
 UI_TEXT = {
     "window_title": "Abaqus ODB 数据提取工具",
@@ -30,7 +31,6 @@ UI_TEXT = {
     "neighbors": "邻近点数量",
     "exact_tol": "精确命中容差",
     "abaqus_command": "Abaqus 命令",
-    "extractor_script": "提取脚本",
     "manual_fields": "手动字段",
     "instance_filter": "实例过滤",
     "node_label_filter": "节点编号",
@@ -46,12 +46,10 @@ UI_TEXT = {
     "select_metadata_title": "选择元数据 JSON 输出文件",
     "select_points_title": "选择目标点 CSV 文件",
     "select_point_output_title": "选择目标点输出 CSV 文件",
-    "select_script_title": "选择 Extract_data_ODB.py",
     "no_fields_found": "未找到场输出。",
     "found_fields": "已在 Step {step} 中找到 {count} 个场输出。",
     "select_odb_first": "请先选择 ODB 文件，再读取场输出。",
     "empty_abaqus": "Abaqus 命令为空，已跳过场输出读取。",
-    "missing_script_log": "提取脚本不存在，已跳过场输出读取。",
     "discovering_fields": "正在读取场输出。",
     "field_discovery_failed_log": "读取场输出失败：{error}",
     "field_discovery_failed_title": "读取场输出失败",
@@ -59,8 +57,6 @@ UI_TEXT = {
     "missing_odb_message": "请先选择 ODB 文件。",
     "missing_abaqus_title": "缺少 Abaqus 命令",
     "missing_abaqus_message": "请设置 ABAQUS_COMMAND、将 Abaqus 加入 PATH，或输入 abq2024/abaqus 路径。",
-    "missing_script_title": "缺少提取脚本",
-    "missing_script_message": "未找到提取脚本。",
     "no_fields_selected_title": "未选择场输出",
     "no_fields_selected_message": "请至少勾选一个场输出。",
     "invalid_node_labels_title": "节点编号格式错误",
@@ -122,21 +118,11 @@ def parse_args(argv=None):
         "--abaqus-command",
         help="Abaqus command or .bat path. Defaults to ABAQUS_COMMAND, abaqus, or abq20xx.",
     )
-    parser.add_argument(
-        "--script",
-        default=None,
-        help="Path to Extract_data_ODB.py. Defaults to the launcher directory.",
-    )
     return parser.parse_args(argv)
 
 
-def default_extractor_script():
-    base_dir = getattr(
-        sys,
-        "_MEIPASS",
-        os.path.dirname(os.path.abspath(__file__)),
-    )
-    return os.path.join(base_dir, "Extract_data_ODB.py")
+def default_extractor_module():
+    return DEFAULT_EXTRACTOR_MODULE
 
 
 def parse_field_text(field_text):
@@ -228,8 +214,8 @@ def choose_odb_with_dialog():
 
 def build_extraction_command(
     abaqus_command,
-    script_path,
     odb_path,
+    extractor_module=None,
     output_path=None,
     metadata_path=None,
     step_name=None,
@@ -239,7 +225,8 @@ def build_extraction_command(
     frequency_min=None,
     frequency_max=None,
 ):
-    command = [abaqus_command, "python", script_path, "--odb", odb_path]
+    extractor_module = extractor_module or default_extractor_module()
+    command = [abaqus_command, "python", "-m", extractor_module, "--odb", odb_path]
     if output_path:
         command.extend(["--output", output_path])
     if metadata_path:
@@ -262,8 +249,17 @@ def build_extraction_command(
     return command
 
 
-def build_field_list_command(abaqus_command, script_path, odb_path, step_name=None):
-    command = [abaqus_command, "python", script_path, "--odb", odb_path, "--list-fields"]
+def build_field_list_command(abaqus_command, extractor_module, odb_path, step_name=None):
+    extractor_module = extractor_module or default_extractor_module()
+    command = [
+        abaqus_command,
+        "python",
+        "-m",
+        extractor_module,
+        "--odb",
+        odb_path,
+        "--list-fields",
+    ]
     if step_name:
         command.extend(["--step", step_name])
     return command
@@ -316,7 +312,7 @@ def run_command_capture(command):
 
 def discover_fields(
     abaqus_command,
-    script_path,
+    extractor_module,
     odb_path,
     step_name=None,
     runner=None,
@@ -324,7 +320,7 @@ def discover_fields(
     runner = run_command_capture if runner is None else runner
     command = build_field_list_command(
         abaqus_command=abaqus_command,
-        script_path=script_path,
+        extractor_module=extractor_module,
         odb_path=odb_path,
         step_name=step_name,
     )
@@ -338,8 +334,8 @@ def discover_fields(
 
 def run_extraction(
     abaqus_command,
-    script_path,
     odb_path,
+    extractor_module=None,
     output_path=None,
     metadata_path=None,
     step_name=None,
@@ -355,8 +351,8 @@ def run_extraction(
     runner = run_command if runner is None else runner
     command = build_extraction_command(
         abaqus_command=abaqus_command,
-        script_path=script_path,
         odb_path=odb_path,
+        extractor_module=extractor_module,
         output_path=output_path,
         metadata_path=metadata_path,
         step_name=step_name,
@@ -380,15 +376,15 @@ def run_extraction(
 
 
 def _default_point_runner(**kwargs):
-    import interpolate_odb_points
+    from odb_extract import interpolate_points
 
-    return interpolate_odb_points.interpolate_files(**kwargs)
+    return interpolate_points.interpolate_files(**kwargs)
 
 
 def run_workflow(
     abaqus_command,
-    script_path,
     odb_path,
+    extractor_module=None,
     output_path=None,
     metadata_path=None,
     step_name=None,
@@ -419,8 +415,8 @@ def run_workflow(
     extraction_runner = run_extraction if extraction_runner is None else extraction_runner
     code = extraction_runner(
         abaqus_command=abaqus_command,
-        script_path=script_path,
         odb_path=odb_path,
+        extractor_module=extractor_module or default_extractor_module(),
         output_path=output_path,
         metadata_path=metadata_path,
         step_name=step_name,
@@ -471,15 +467,10 @@ def run_cli(argv=None):
         )
         return 2
 
-    script_path = args.script or default_extractor_script()
-    if not os.path.exists(script_path):
-        print("ERROR: Extractor script not found: {}".format(script_path), file=sys.stderr)
-        return 2
-
     return run_workflow(
         abaqus_command=abaqus_command,
-        script_path=script_path,
         odb_path=odb_path,
+        extractor_module=default_extractor_module(),
         output_path=args.output,
         metadata_path=args.metadata,
         step_name=args.step,
@@ -521,7 +512,6 @@ class ExtractOdbApp(object):
         self.frequency_min_var = tk.StringVar()
         self.frequency_max_var = tk.StringVar()
         self.abaqus_var = tk.StringVar(value=find_abaqus_command() or "")
-        self.script_var = tk.StringVar(value=default_extractor_script())
         self.status_var = tk.StringVar(value=UI_TEXT["ready"])
         self._running = False
         self.field_vars = {}
@@ -554,8 +544,6 @@ class ExtractOdbApp(object):
             self.choose_point_output,
         )
         self._add_path_row(frame, 5, UI_TEXT["abaqus_command"], self.abaqus_var, None)
-        self._add_path_row(frame, 6, UI_TEXT["extractor_script"], self.script_var, self.choose_script)
-
         ttk.Label(frame, text="Step").grid(row=7, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.step_var).grid(
             row=7, column=1, columnspan=2, sticky="ew", pady=4
@@ -778,16 +766,6 @@ class ExtractOdbApp(object):
         if path:
             self.point_output_var.set(path)
 
-    def choose_script(self):
-        from tkinter import filedialog
-
-        path = filedialog.askopenfilename(
-            title=UI_TEXT["select_script_title"],
-            filetypes=(("Python", "*.py"), ("All files", "*.*")),
-        )
-        if path:
-            self.script_var.set(path)
-
     def log(self, message):
         self.log_text.insert("end", "{}\n".format(message))
         self.log_text.see("end")
@@ -873,27 +851,27 @@ class ExtractOdbApp(object):
         if not abaqus_command:
             self.log(UI_TEXT["empty_abaqus"])
             return
-        script_path = self.script_var.get().strip()
-        if not os.path.exists(script_path):
-            self.log(UI_TEXT["missing_script_log"])
-            return
-
         self.log(UI_TEXT["discovering_fields"])
         self._set_running(True)
         worker = threading.Thread(
             target=self._discover_fields_worker,
-            args=(abaqus_command, script_path, odb_path, self.step_var.get().strip() or None),
+            args=(
+                abaqus_command,
+                default_extractor_module(),
+                odb_path,
+                self.step_var.get().strip() or None,
+            ),
         )
         worker.daemon = True
         worker.start()
 
-    def _discover_fields_worker(self, abaqus_command, script_path, odb_path, step_name):
+    def _discover_fields_worker(self, abaqus_command, extractor_module, odb_path, step_name):
         from tkinter import messagebox
 
         try:
             metadata = discover_fields(
                 abaqus_command=abaqus_command,
-                script_path=script_path,
+                extractor_module=extractor_module,
                 odb_path=odb_path,
                 step_name=step_name,
             )
@@ -937,11 +915,6 @@ class ExtractOdbApp(object):
                 UI_TEXT["missing_abaqus_title"],
                 UI_TEXT["missing_abaqus_message"],
             )
-            return None
-
-        script_path = self.script_var.get().strip()
-        if not os.path.exists(script_path):
-            messagebox.showerror(UI_TEXT["missing_script_title"], UI_TEXT["missing_script_message"])
             return None
 
         fields = self._selected_fields()
@@ -995,8 +968,8 @@ class ExtractOdbApp(object):
         point_fields = parse_field_text(self.point_fields_var.get())
         return {
             "abaqus_command": abaqus_command,
-            "script_path": script_path,
             "odb_path": odb_path,
+            "extractor_module": default_extractor_module(),
             "output_path": output_path,
             "metadata_path": metadata_path,
             "step_name": step_name,

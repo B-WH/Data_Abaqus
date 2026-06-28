@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-import Extract_data_ODB as extractor
+from odb_extract import extractor
 
 
 class FakeNode(object):
@@ -114,7 +114,7 @@ class ExtractorTests(unittest.TestCase):
         finally:
             importlib.import_module = original_import_module
 
-        self.assertIn("abaqus python Extract_data_ODB.py", str(context.exception))
+        self.assertIn("abaqus python -m odb_extract.extractor", str(context.exception))
 
     def test_collect_nodes_returns_sorted_instance_node_pairs(self):
         nodes = extractor.collect_nodes(FakeOdb())
@@ -464,7 +464,7 @@ class ExtractorTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(metadata["tool"]["name"], "Extract_data_ODB.py")
+        self.assertEqual(metadata["tool"]["name"], "odb_extract.extractor")
         self.assertEqual(metadata["tool"]["metadata_schema_version"], 1)
         self.assertEqual(metadata["command_options"]["fields"], ["U"])
         self.assertEqual(metadata["command_options"]["frequency_min"], 5.0)

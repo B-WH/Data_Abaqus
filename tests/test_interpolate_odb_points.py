@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-import interpolate_odb_points as interp
+from odb_extract import interpolate_points as interp
 
 
 class InterpolateOdbPointsTests(unittest.TestCase):
