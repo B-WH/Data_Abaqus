@@ -369,6 +369,8 @@ class LauncherTests(unittest.TestCase):
         app.exact_tol_var = self.FakeVar("1e-8")
         app.abaqus_var = self.FakeVar("abaqus")
         app.field_vars = {}
+        app.node_sets_var = self.FakeVar("")
+        app.node_set_vars = {}
 
         options = app._validate_inputs()
 

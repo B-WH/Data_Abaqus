@@ -589,6 +589,8 @@ class ExtractOdbApp(object):
         self.status_var = tk.StringVar(value=UI_TEXT["ready"])
         self._running = False
         self.field_vars = {}
+        self.node_sets_var = tk.StringVar()
+        self.node_set_vars = {}
 
         self._build_widgets()
 
@@ -602,7 +604,7 @@ class ExtractOdbApp(object):
         frame = ttk.Frame(self.root, padding=12)
         frame.grid(row=0, column=0, sticky="nsew")
         frame.columnconfigure(1, weight=1)
-        frame.rowconfigure(17, weight=1)
+        frame.rowconfigure(19, weight=1)
 
         self._add_path_row(frame, 0, UI_TEXT["odb_file"], self.odb_var, self.choose_odb)
         self._add_path_row(frame, 1, UI_TEXT["npz_output"], self.output_var, self.choose_output)
@@ -644,9 +646,11 @@ class ExtractOdbApp(object):
             row=10, column=1, columnspan=2, sticky="ew", pady=4
         )
 
-        ttk.Label(frame, text=UI_TEXT["frequency_min"]).grid(row=11, column=0, sticky="w", pady=4)
+        self._build_node_set_widgets(frame, 11)
+
+        ttk.Label(frame, text=UI_TEXT["frequency_min"]).grid(row=13, column=0, sticky="w", pady=4)
         frequency_frame = ttk.Frame(frame)
-        frequency_frame.grid(row=11, column=1, columnspan=2, sticky="ew", pady=4)
+        frequency_frame.grid(row=13, column=1, columnspan=2, sticky="ew", pady=4)
         frequency_frame.columnconfigure(0, weight=1)
         frequency_frame.columnconfigure(2, weight=1)
         ttk.Entry(frequency_frame, textvariable=self.frequency_min_var).grid(
@@ -659,14 +663,14 @@ class ExtractOdbApp(object):
             row=0, column=2, sticky="ew"
         )
 
-        ttk.Label(frame, text=UI_TEXT["point_fields"]).grid(row=12, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text=UI_TEXT["point_fields"]).grid(row=14, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.point_fields_var).grid(
-            row=12, column=1, columnspan=2, sticky="ew", pady=4
+            row=14, column=1, columnspan=2, sticky="ew", pady=4
         )
 
-        ttk.Label(frame, text=UI_TEXT["neighbors"]).grid(row=13, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text=UI_TEXT["neighbors"]).grid(row=15, column=0, sticky="w", pady=4)
         point_options_frame = ttk.Frame(frame)
-        point_options_frame.grid(row=13, column=1, columnspan=2, sticky="ew", pady=4)
+        point_options_frame.grid(row=15, column=1, columnspan=2, sticky="ew", pady=4)
         point_options_frame.columnconfigure(0, weight=1)
         point_options_frame.columnconfigure(2, weight=1)
         ttk.Entry(point_options_frame, textvariable=self.neighbors_var).grid(
@@ -680,7 +684,7 @@ class ExtractOdbApp(object):
         )
 
         self.field_box = ttk.LabelFrame(frame, text=UI_TEXT["available_fields"])
-        self.field_box.grid(row=14, column=0, columnspan=3, sticky="ew", pady=(4, 8))
+        self.field_box.grid(row=16, column=0, columnspan=3, sticky="ew", pady=(4, 8))
         self.field_box.columnconfigure(0, weight=1)
         self.field_box.rowconfigure(1, weight=1)
 
@@ -735,15 +739,15 @@ class ExtractOdbApp(object):
         self.field_hint.grid(row=0, column=0, sticky="w", padx=8, pady=8)
 
         button_bar = ttk.Frame(frame)
-        button_bar.grid(row=15, column=0, columnspan=3, sticky="ew", pady=(8, 6))
+        button_bar.grid(row=17, column=0, columnspan=3, sticky="ew", pady=(8, 6))
         self.run_button = ttk.Button(button_bar, text=UI_TEXT["run_button"], command=self.run)
         self.run_button.pack(side="left")
         ttk.Label(button_bar, textvariable=self.status_var).pack(side="left", padx=12)
 
         self.log_text = tk.Text(frame, height=12, wrap="word")
-        self.log_text.grid(row=17, column=0, columnspan=3, sticky="nsew")
+        self.log_text.grid(row=19, column=0, columnspan=3, sticky="nsew")
         scrollbar = ttk.Scrollbar(frame, command=self.log_text.yview)
-        scrollbar.grid(row=17, column=3, sticky="ns")
+        scrollbar.grid(row=19, column=3, sticky="ns")
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
     def _add_path_row(self, frame, row, label, variable, command):
@@ -759,6 +763,71 @@ class ExtractOdbApp(object):
             ttk.Button(frame, text=UI_TEXT["browse"], command=command).grid(
                 row=row, column=2, sticky="ew", pady=4
             )
+
+    def _build_node_set_widgets(self, frame, row_offset):
+        """Build node set filter row: label, text entry, and action buttons."""
+        from tkinter import ttk
+
+        ttk.Label(frame, text=UI_TEXT["node_set_filter"]).grid(
+            row=row_offset, column=0, sticky="w", pady=4
+        )
+        ttk.Entry(frame, textvariable=self.node_sets_var).grid(
+            row=row_offset, column=1, sticky="ew", pady=4, padx=(0, 6)
+        )
+        nset_button_frame = ttk.Frame(frame)
+        nset_button_frame.grid(row=row_offset, column=2, sticky="ew", pady=4)
+        self.refresh_nset_button = ttk.Button(
+            nset_button_frame,
+            text=UI_TEXT["refresh_node_sets"],
+            command=self.refresh_node_sets,
+        )
+        self.refresh_nset_button.pack(side="left", padx=(0, 4))
+        ttk.Button(
+            nset_button_frame,
+            text=UI_TEXT["select_all_node_sets"],
+            command=lambda: self._set_node_set_selection("all"),
+        ).pack(side="left", padx=(0, 4))
+        ttk.Button(
+            nset_button_frame,
+            text=UI_TEXT["clear_all_node_sets"],
+            command=lambda: self._set_node_set_selection("none"),
+        ).pack(side="left")
+
+        # Node set checkbox canvas
+        self.nset_box = ttk.LabelFrame(frame, text=UI_TEXT["node_set_filter"])
+        self.nset_box.grid(
+            row=row_offset + 1, column=0, columnspan=3, sticky="ew", pady=(4, 8)
+        )
+        self.nset_box.columnconfigure(0, weight=1)
+        self.nset_box.rowconfigure(0, weight=1)
+
+        self.nset_canvas = tk.Canvas(
+            self.nset_box,
+            height=80,
+            highlightthickness=0,
+        )
+        self.nset_canvas.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
+        nset_scrollbar = ttk.Scrollbar(
+            self.nset_box,
+            orient="vertical",
+            command=self.nset_canvas.yview,
+        )
+        nset_scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 6), pady=6)
+        self.nset_canvas.configure(yscrollcommand=nset_scrollbar.set)
+
+        self.nset_checks_frame = ttk.Frame(self.nset_canvas)
+        self.nset_canvas_window = self.nset_canvas.create_window(
+            (0, 0),
+            window=self.nset_checks_frame,
+            anchor="nw",
+        )
+        self.nset_checks_frame.bind("<Configure>", self._update_nset_scroll_region)
+        self.nset_canvas.bind("<Configure>", self._resize_nset_checks_frame)
+        self.nset_hint = ttk.Label(
+            self.nset_checks_frame,
+            text=UI_TEXT["node_set_hint"],
+        )
+        self.nset_hint.grid(row=0, column=0, sticky="w", padx=8, pady=8)
 
     def choose_odb(self):
         from tkinter import filedialog
@@ -777,6 +846,7 @@ class ExtractOdbApp(object):
         if not self.point_output_var.get().strip():
             self.point_output_var.set(default_point_output_path(path))
         self.refresh_fields()
+        self.refresh_node_sets()
 
     def choose_output(self):
         from tkinter import filedialog
@@ -853,6 +923,7 @@ class ExtractOdbApp(object):
         self.refresh_button.configure(state="disabled" if running else "normal")
         for button in self.field_selection_buttons:
             button.configure(state="disabled" if running else "normal")
+        self.refresh_nset_button.configure(state="disabled" if running else "normal")
         self.status_var.set(UI_TEXT["running"] if running else UI_TEXT["ready"])
 
     def _update_field_scroll_region(self, _event=None):
@@ -860,6 +931,63 @@ class ExtractOdbApp(object):
 
     def _resize_field_checks_frame(self, event):
         self.field_canvas.itemconfigure(self.field_canvas_window, width=event.width)
+
+    def _update_nset_scroll_region(self, _event=None):
+        self.nset_canvas.configure(scrollregion=self.nset_canvas.bbox("all"))
+
+    def _resize_nset_checks_frame(self, event):
+        self.nset_canvas.itemconfigure(self.nset_canvas_window, width=event.width)
+
+    def _clear_node_set_checks(self):
+        for child in self.nset_checks_frame.winfo_children():
+            child.destroy()
+        self.node_set_vars = {}
+
+    def _sync_node_sets_from_checks(self):
+        selected = [
+            name
+            for name, variable in sorted(self.node_set_vars.items())
+            if variable.get()
+        ]
+        self.node_sets_var.set(" ".join(selected))
+
+    def _set_node_set_selection(self, mode):
+        if mode == "all":
+            for variable in self.node_set_vars.values():
+                variable.set(True)
+        elif mode == "none":
+            for variable in self.node_set_vars.values():
+                variable.set(False)
+        self._sync_node_sets_from_checks()
+
+    def _show_discovered_node_sets(self, metadata):
+        tk = self.tk
+        from tkinter import ttk
+
+        node_sets = metadata.get("node_sets", [])
+        self._clear_node_set_checks()
+        if not node_sets:
+            ttk.Label(
+                self.nset_checks_frame,
+                text=UI_TEXT["no_node_sets_found"],
+            ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
+            self.node_sets_var.set("")
+            return
+
+        for index, name in enumerate(node_sets):
+            variable = tk.BooleanVar(value=False)
+            self.node_set_vars[name] = variable
+            ttk.Checkbutton(
+                self.nset_checks_frame,
+                text=name,
+                variable=variable,
+                command=self._sync_node_sets_from_checks,
+            ).grid(row=index // 6, column=index % 6, sticky="w", padx=8, pady=4)
+
+        self.nset_canvas.yview_moveto(0)
+        self.log(
+            UI_TEXT["found_node_sets"].format(count=len(node_sets))
+        )
 
     def _clear_field_checks(self):
         for child in self.field_checks_frame.winfo_children():
@@ -966,6 +1094,57 @@ class ExtractOdbApp(object):
 
         self.root.after(0, finish)
 
+    def refresh_node_sets(self):
+        """Trigger node set discovery in background thread."""
+        if self._running:
+            return
+        odb_path = self.odb_var.get().strip()
+        if not odb_path:
+            self.log(UI_TEXT["select_odb_for_node_sets"])
+            return
+        abaqus_command = self.abaqus_var.get().strip()
+        if not abaqus_command:
+            self.log(UI_TEXT["empty_abaqus"])
+            return
+        self.log(UI_TEXT["discovering_fields"])
+        self._set_running(True)
+        worker = threading.Thread(
+            target=self._discover_node_sets_worker,
+            args=(abaqus_command, default_extractor_module(), odb_path),
+        )
+        worker.daemon = True
+        worker.start()
+
+    def _discover_node_sets_worker(self, abaqus_command, extractor_module, odb_path):
+        from tkinter import messagebox
+
+        try:
+            metadata = discover_node_sets(
+                abaqus_command=abaqus_command,
+                extractor_module=extractor_module,
+                odb_path=odb_path,
+            )
+        except Exception as exc:
+            error_message = str(exc)
+
+            def fail():
+                self._set_running(False)
+                self.log(
+                    UI_TEXT["node_set_discovery_failed_log"].format(error=error_message)
+                )
+                messagebox.showerror(
+                    UI_TEXT["node_set_discovery_failed"], error_message
+                )
+
+            self.root.after(0, fail)
+            return
+
+        def finish():
+            self._set_running(False)
+            self._show_discovered_node_sets(metadata)
+
+        self.root.after(0, finish)
+
     def _selected_fields(self):
         if self.field_vars:
             return [
@@ -1033,6 +1212,7 @@ class ExtractOdbApp(object):
                 UI_TEXT["invalid_exact_tol_message"],
             )
             return None
+        node_sets = parse_node_set_text(self.node_sets_var.get())
         instances = parse_field_text(self.instances_var.get())
         output_path = self.output_var.get().strip() or None
         metadata_path = self.metadata_var.get().strip() or None
@@ -1052,6 +1232,7 @@ class ExtractOdbApp(object):
             "node_labels": node_labels,
             "frequency_min": frequency_min,
             "frequency_max": frequency_max,
+            "node_sets": node_sets,
             "points_path": points_path,
             "point_output_path": point_output_path,
             "point_fields": point_fields,
