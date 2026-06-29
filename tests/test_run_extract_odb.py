@@ -422,6 +422,139 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(run_workflow.call_args[1]["points_path"], "points.csv")
         self.assertEqual(run_workflow.call_args[1]["point_output_path"], "output/points.csv")
 
+    # --- Node set parsing ---
+
+    def test_parse_node_set_text_accepts_spaces_and_commas(self):
+        self.assertEqual(
+            launcher.parse_node_set_text("NSET_TOP, NSET_BOTTOM  NSET_SIDE"),
+            ["NSET_TOP", "NSET_BOTTOM", "NSET_SIDE"],
+        )
+
+    def test_parse_node_set_text_returns_none_for_blank(self):
+        self.assertIsNone(launcher.parse_node_set_text("  ,  "))
+
+    def test_build_node_set_list_command_includes_list_node_sets_flag(self):
+        command = launcher.build_node_set_list_command(
+            abaqus_command="abaqus",
+            extractor_module="odb_extract.extractor",
+            odb_path="data/test1.odb",
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "abaqus",
+                "python",
+                "-m",
+                "odb_extract.extractor",
+                "--odb",
+                "data/test1.odb",
+                "--list-node-sets",
+            ],
+        )
+
+    def test_parse_node_set_list_output_reads_json_line(self):
+        metadata = launcher.parse_node_set_list_output(
+            'Abaqus startup text\n{"node_sets": ["NSET_TOP", "NSET_BOTTOM"], "source_odb": "test.odb"}\n'
+        )
+
+        self.assertEqual(metadata["node_sets"], ["NSET_TOP", "NSET_BOTTOM"])
+        self.assertEqual(metadata["source_odb"], "test.odb")
+
+    def test_parse_node_set_list_output_raises_on_missing_array(self):
+        with self.assertRaises(ValueError):
+            launcher.parse_node_set_list_output(
+                '{"node_sets": "not_a_list"}\n'
+            )
+
+    def test_parse_node_set_list_output_raises_on_no_json(self):
+        with self.assertRaises(ValueError):
+            launcher.parse_node_set_list_output("No JSON here.\n")
+
+    def test_discover_node_sets_calls_runner_and_returns_metadata(self):
+        def fake_runner(command):
+            return 0, '{"node_sets": ["NSET_A", "NSET_B"]}\n'
+
+        metadata = launcher.discover_node_sets(
+            abaqus_command="abaqus",
+            extractor_module="odb_extract.extractor",
+            odb_path="data/test1.odb",
+            runner=fake_runner,
+        )
+
+        self.assertEqual(metadata["node_sets"], ["NSET_A", "NSET_B"])
+
+    def test_discover_node_sets_raises_on_nonzero_exit(self):
+        def fake_runner(command):
+            return 1, "Error: ODB not found\n"
+
+        with self.assertRaises(RuntimeError) as context:
+            launcher.discover_node_sets(
+                abaqus_command="abaqus",
+                extractor_module="odb_extract.extractor",
+                odb_path="data/test1.odb",
+                runner=fake_runner,
+            )
+
+        self.assertIn("exit code 1", str(context.exception))
+
+    # --- Command building with node sets ---
+
+    def test_build_extraction_command_includes_node_sets(self):
+        command = launcher.build_extraction_command(
+            abaqus_command="abq2024",
+            extractor_module="odb_extract.extractor",
+            odb_path=r"D:\work\data\test1.odb",
+            node_sets=["NSET_TOP", "NSET_BOTTOM"],
+        )
+
+        self.assertIn("--node-sets", command)
+        nset_index = command.index("--node-sets")
+        self.assertEqual(command[nset_index + 1], "NSET_TOP")
+        self.assertEqual(command[nset_index + 2], "NSET_BOTTOM")
+
+    def test_ui_text_has_node_set_labels(self):
+        self.assertEqual(launcher.UI_TEXT["node_set_filter"], "节点集")
+        self.assertEqual(launcher.UI_TEXT["refresh_node_sets"], "读取节点集")
+        self.assertEqual(launcher.UI_TEXT["select_all_node_sets"], "全选")
+        self.assertEqual(launcher.UI_TEXT["clear_all_node_sets"], "全不选")
+        self.assertEqual(
+            launcher.UI_TEXT["node_set_hint"],
+            "请选择 ODB 文件以读取节点集。",
+        )
+        self.assertEqual(
+            launcher.UI_TEXT["no_node_sets_found"],
+            "未找到节点集。",
+        )
+        self.assertEqual(
+            launcher.UI_TEXT["found_node_sets"],
+            "已在 ODB 中找到 {count} 个节点集。",
+        )
+
+    def test_validate_inputs_includes_node_sets(self):
+        app = object.__new__(launcher.ExtractOdbApp)
+        app.odb_var = self.FakeVar("data/test1.odb")
+        app.output_var = self.FakeVar("output/data.npz")
+        app.metadata_var = self.FakeVar("output/meta.json")
+        app.step_var = self.FakeVar("Step-1")
+        app.fields_var = self.FakeVar("U V")
+        app.instances_var = self.FakeVar("PART-1-1")
+        app.node_labels_var = self.FakeVar("")
+        app.node_sets_var = self.FakeVar("NSET_TOP NSET_BOTTOM")
+        app.frequency_min_var = self.FakeVar("")
+        app.frequency_max_var = self.FakeVar("")
+        app.points_var = self.FakeVar("")
+        app.point_output_var = self.FakeVar("")
+        app.point_fields_var = self.FakeVar("")
+        app.neighbors_var = self.FakeVar("4")
+        app.exact_tol_var = self.FakeVar("")
+        app.abaqus_var = self.FakeVar("abaqus")
+        app.field_vars = {}
+
+        options = app._validate_inputs()
+
+        self.assertEqual(options["node_sets"], ["NSET_TOP", "NSET_BOTTOM"])
+
 
 if __name__ == "__main__":
     unittest.main()
