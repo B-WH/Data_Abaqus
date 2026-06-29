@@ -51,6 +51,7 @@ UI_TEXT = {
     "select_odb_first": "请先选择 ODB 文件，再读取场输出。",
     "empty_abaqus": "Abaqus 命令为空，已跳过场输出读取。",
     "discovering_fields": "正在读取场输出。",
+    "discovering_node_sets": "正在读取节点集。",
     "field_discovery_failed_log": "读取场输出失败：{error}",
     "field_discovery_failed_title": "读取场输出失败",
     "missing_odb_title": "缺少 ODB 文件",
@@ -782,16 +783,20 @@ class ExtractOdbApp(object):
             command=self.refresh_node_sets,
         )
         self.refresh_nset_button.pack(side="left", padx=(0, 4))
-        ttk.Button(
-            nset_button_frame,
-            text=UI_TEXT["select_all_node_sets"],
-            command=lambda: self._set_node_set_selection("all"),
-        ).pack(side="left", padx=(0, 4))
-        ttk.Button(
-            nset_button_frame,
-            text=UI_TEXT["clear_all_node_sets"],
-            command=lambda: self._set_node_set_selection("none"),
-        ).pack(side="left")
+        self.node_set_selection_buttons = [
+            ttk.Button(
+                nset_button_frame,
+                text=UI_TEXT["select_all_node_sets"],
+                command=lambda: self._set_node_set_selection("all"),
+            ),
+            ttk.Button(
+                nset_button_frame,
+                text=UI_TEXT["clear_all_node_sets"],
+                command=lambda: self._set_node_set_selection("none"),
+            ),
+        ]
+        self.node_set_selection_buttons[0].pack(side="left", padx=(0, 4))
+        self.node_set_selection_buttons[1].pack(side="left")
 
         # Node set checkbox canvas
         self.nset_box = ttk.LabelFrame(frame, text=UI_TEXT["node_set_filter"])
@@ -924,6 +929,8 @@ class ExtractOdbApp(object):
         for button in self.field_selection_buttons:
             button.configure(state="disabled" if running else "normal")
         self.refresh_nset_button.configure(state="disabled" if running else "normal")
+        for button in self.node_set_selection_buttons:
+            button.configure(state="disabled" if running else "normal")
         self.status_var.set(UI_TEXT["running"] if running else UI_TEXT["ready"])
 
     def _update_field_scroll_region(self, _event=None):
@@ -1106,7 +1113,7 @@ class ExtractOdbApp(object):
         if not abaqus_command:
             self.log(UI_TEXT["empty_abaqus"])
             return
-        self.log(UI_TEXT["discovering_fields"])
+        self.log(UI_TEXT["discovering_node_sets"])
         self._set_running(True)
         worker = threading.Thread(
             target=self._discover_node_sets_worker,
