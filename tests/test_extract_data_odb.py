@@ -3,6 +3,7 @@ import importlib
 import os
 import sys
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -469,6 +470,164 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(metadata["command_options"]["fields"], ["U"])
         self.assertEqual(metadata["command_options"]["frequency_min"], 5.0)
         self.assertEqual(metadata["command_options"]["frequency_max"], 50.0)
+
+    def test_node_sets_argument_parsing(self):
+        from odb_extract.extractor import parse_args
+
+        args = parse_args(["--node-sets", "NSET_TOP", "NSET_BOTTOM"])
+        self.assertEqual(args.node_sets, ["NSET_TOP", "NSET_BOTTOM"])
+
+    def test_list_node_sets_argument_parsing(self):
+        from odb_extract.extractor import parse_args
+
+        args = parse_args(["--list-node-sets"])
+        self.assertTrue(args.list_node_sets)
+
+    def test_node_sets_default_is_none(self):
+        from odb_extract.extractor import parse_args
+
+        args = parse_args([])
+        self.assertIsNone(args.node_sets)
+        self.assertFalse(args.list_node_sets)
+
+    def test_collect_nodes_filters_by_node_set(self):
+        from odb_extract.extractor import collect_nodes
+
+        # Build a minimal mock ODB
+        fake_node_a = mock.Mock()
+        fake_node_a.label = 1
+        fake_node_a.coordinates = (0.0, 0.0, 0.0)
+        fake_node_a.instanceName = "PART-1-1"
+
+        fake_node_b = mock.Mock()
+        fake_node_b.label = 2
+        fake_node_b.coordinates = (1.0, 0.0, 0.0)
+        fake_node_b.instanceName = "PART-1-1"
+
+        fake_instance = mock.Mock()
+        fake_instance.nodes = [fake_node_a, fake_node_b]
+
+        fake_nset = mock.Mock()
+        fake_nset.nodes = [fake_node_a]  # only node 1 is in the set
+
+        fake_assembly = mock.Mock()
+        fake_assembly.instances = {"PART-1-1": fake_instance}
+        fake_assembly.nodeSets = {"NSET_TOP": fake_nset}
+
+        fake_odb = mock.Mock()
+        fake_odb.rootAssembly = fake_assembly
+
+        warnings = []
+        nodes = collect_nodes(
+            fake_odb,
+            node_set_names=["NSET_TOP"],
+            warnings=warnings,
+        )
+
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0].label, 1)
+        self.assertEqual(warnings, [])
+
+    def test_collect_nodes_and_combines_filters(self):
+        from odb_extract.extractor import collect_nodes
+
+        fake_node_a = mock.Mock()
+        fake_node_a.label = 1
+        fake_node_a.coordinates = (0.0, 0.0, 0.0)
+        fake_node_a.instanceName = "PART-1-1"
+
+        fake_node_b = mock.Mock()
+        fake_node_b.label = 2
+        fake_node_b.coordinates = (1.0, 0.0, 0.0)
+        fake_node_b.instanceName = "PART-1-2"
+
+        fake_node_c = mock.Mock()
+        fake_node_c.label = 3
+        fake_node_c.coordinates = (2.0, 0.0, 0.0)
+        fake_node_c.instanceName = "PART-1-1"
+
+        inst1 = mock.Mock()
+        inst1.nodes = [fake_node_a, fake_node_c]
+        inst2 = mock.Mock()
+        inst2.nodes = [fake_node_b]
+
+        fake_nset = mock.Mock()
+        fake_nset.nodes = [fake_node_a, fake_node_b]  # across two instances
+
+        fake_assembly = mock.Mock()
+        fake_assembly.instances = {"PART-1-1": inst1, "PART-1-2": inst2}
+        fake_assembly.nodeSets = {"NSET_ALL": fake_nset}
+
+        fake_odb = mock.Mock()
+        fake_odb.rootAssembly = fake_assembly
+
+        # Filter: only PART-1-1 instances AND node labels 1,3 AND NSET_ALL
+        nodes = collect_nodes(
+            fake_odb,
+            instances=["PART-1-1"],
+            node_labels=[1, 3],
+            node_set_names=["NSET_ALL"],
+        )
+
+        # node_a: PART-1-1 + label 1 + in NSET_ALL → included
+        # node_c: PART-1-1 + label 3 + NOT in NSET_ALL → excluded
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0].label, 1)
+
+    def test_node_set_not_found_emits_warning(self):
+        from odb_extract.extractor import collect_nodes
+
+        fake_node = mock.Mock()
+        fake_node.label = 1
+        fake_node.coordinates = (0.0, 0.0, 0.0)
+        fake_node.instanceName = "PART-1-1"
+
+        fake_instance = mock.Mock()
+        fake_instance.nodes = [fake_node]
+
+        fake_assembly = mock.Mock()
+        fake_assembly.instances = {"PART-1-1": fake_instance}
+        fake_assembly.nodeSets = {}  # empty node sets
+
+        fake_odb = mock.Mock()
+        fake_odb.rootAssembly = fake_assembly
+
+        warnings = []
+        nodes = collect_nodes(
+            fake_odb,
+            node_set_names=["NONEXISTENT"],
+            warnings=warnings,
+        )
+
+        self.assertEqual(len(nodes), 0)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("NONEXISTENT", warnings[0])
+
+    def test_collect_nodes_without_node_set_returns_all(self):
+        from odb_extract.extractor import collect_nodes
+
+        fake_node_a = mock.Mock()
+        fake_node_a.label = 1
+        fake_node_a.coordinates = (0.0, 0.0, 0.0)
+        fake_node_a.instanceName = "PART-1-1"
+
+        fake_node_b = mock.Mock()
+        fake_node_b.label = 2
+        fake_node_b.coordinates = (1.0, 0.0, 0.0)
+        fake_node_b.instanceName = "PART-1-1"
+
+        fake_instance = mock.Mock()
+        fake_instance.nodes = [fake_node_a, fake_node_b]
+
+        fake_assembly = mock.Mock()
+        fake_assembly.instances = {"PART-1-1": fake_instance}
+        fake_assembly.nodeSets = {}
+
+        fake_odb = mock.Mock()
+        fake_odb.rootAssembly = fake_assembly
+
+        nodes = collect_nodes(fake_odb, node_set_names=None)
+        self.assertEqual(len(nodes), 2)
 
 
 if __name__ == "__main__":
