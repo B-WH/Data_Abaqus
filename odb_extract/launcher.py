@@ -79,6 +79,16 @@ UI_TEXT = {
     "select_all_fields": "全选",
     "clear_all_fields": "全不选",
     "select_default_fields": "默认字段",
+    "node_set_filter": "节点集",
+    "node_set_hint": "请选择 ODB 文件以读取节点集。",
+    "no_node_sets_found": "未找到节点集。",
+    "found_node_sets": "已在 ODB 中找到 {count} 个节点集。",
+    "select_all_node_sets": "全选",
+    "clear_all_node_sets": "全不选",
+    "refresh_node_sets": "读取节点集",
+    "node_set_discovery_failed": "读取节点集失败",
+    "node_set_discovery_failed_log": "读取节点集失败：{error}",
+    "select_odb_for_node_sets": "请先选择 ODB 文件，再读取节点集。",
 }
 
 
@@ -93,6 +103,11 @@ def parse_args(argv=None):
     parser.add_argument("--fields", nargs="+", help="Optional field names, e.g. U V A.")
     parser.add_argument("--instances", nargs="+", help="Optional instance names to include.")
     parser.add_argument("--node-labels", nargs="+", help="Optional node labels to include.")
+    parser.add_argument(
+        "--node-sets",
+        nargs="+",
+        help="Optional node set names to filter nodes by.",
+    )
     parser.add_argument("--frequency-min", type=float, help="Optional minimum frame frequency.")
     parser.add_argument("--frequency-max", type=float, help="Optional maximum frame frequency.")
     parser.add_argument("--points", help="Optional point CSV with point_id,x,y,z columns.")
@@ -137,6 +152,12 @@ def parse_node_label_text(label_text):
             continue
         labels.append(int(part))
     return labels or None
+
+
+def parse_node_set_text(text):
+    """Parse space/comma/semicolon separated node set names from user input."""
+    names = [part for part in re.split(r"[\s,;]+", text.strip()) if part]
+    return names or None
 
 
 def parse_optional_float(value_text):
@@ -224,6 +245,7 @@ def build_extraction_command(
     node_labels=None,
     frequency_min=None,
     frequency_max=None,
+    node_sets=None,
 ):
     extractor_module = extractor_module or default_extractor_module()
     command = [abaqus_command, "python", "-m", extractor_module, "--odb", odb_path]
@@ -246,6 +268,9 @@ def build_extraction_command(
         command.extend(["--frequency-min", str(frequency_min)])
     if frequency_max is not None:
         command.extend(["--frequency-max", str(frequency_max)])
+    if node_sets:
+        command.append("--node-sets")
+        command.extend(node_sets)
     return command
 
 
@@ -276,6 +301,50 @@ def parse_field_list_output(output_text):
             raise ValueError("Field list JSON does not contain a fields array.")
         return metadata
     raise ValueError("Could not find field list JSON in Abaqus output.")
+
+
+def build_node_set_list_command(abaqus_command, extractor_module, odb_path):
+    """Build the Abaqus command to list available node sets."""
+    extractor_module = extractor_module or default_extractor_module()
+    return [
+        abaqus_command,
+        "python",
+        "-m",
+        extractor_module,
+        "--odb",
+        odb_path,
+        "--list-node-sets",
+    ]
+
+
+def parse_node_set_list_output(output_text):
+    """Parse the JSON line from --list-node-sets output."""
+    for line in output_text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        metadata = json.loads(line)
+        node_sets = metadata.get("node_sets")
+        if not isinstance(node_sets, list):
+            raise ValueError("Node set list JSON does not contain a node_sets array.")
+        return metadata
+    raise ValueError("Could not find node set list JSON in Abaqus output.")
+
+
+def discover_node_sets(abaqus_command, extractor_module, odb_path, runner=None):
+    """Discover available node sets from an ODB by calling Abaqus Python."""
+    runner = run_command_capture if runner is None else runner
+    command = build_node_set_list_command(
+        abaqus_command=abaqus_command,
+        extractor_module=extractor_module,
+        odb_path=odb_path,
+    )
+    code, output = runner(command)
+    if code != 0:
+        raise RuntimeError(
+            "Node set discovery failed with exit code {}.\n{}".format(code, output)
+        )
+    return parse_node_set_list_output(output)
 
 
 def run_command(command, log_callback=None):
@@ -344,6 +413,7 @@ def run_extraction(
     node_labels=None,
     frequency_min=None,
     frequency_max=None,
+    node_sets=None,
     runner=None,
     verbose=True,
     log_callback=None,
@@ -361,6 +431,7 @@ def run_extraction(
         node_labels=node_labels,
         frequency_min=frequency_min,
         frequency_max=frequency_max,
+        node_sets=node_sets,
     )
     if verbose:
         print(
@@ -393,6 +464,7 @@ def run_workflow(
     node_labels=None,
     frequency_min=None,
     frequency_max=None,
+    node_sets=None,
     points_path=None,
     point_output_path=None,
     point_fields=None,
@@ -425,6 +497,7 @@ def run_workflow(
         node_labels=node_labels,
         frequency_min=frequency_min,
         frequency_max=frequency_max,
+        node_sets=node_sets,
         verbose=verbose,
         log_callback=log_callback,
     )
@@ -479,6 +552,7 @@ def run_cli(argv=None):
         node_labels=args.node_labels,
         frequency_min=args.frequency_min,
         frequency_max=args.frequency_max,
+        node_sets=args.node_sets,
         points_path=args.points,
         point_output_path=args.point_output,
         point_fields=args.point_fields,
