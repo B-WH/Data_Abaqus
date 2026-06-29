@@ -74,6 +74,17 @@ def parse_args(argv=None):
         help="Optional maximum frame frequency.",
     )
     parser.add_argument(
+        "--node-sets",
+        nargs="+",
+        default=None,
+        help="Optional node set names to filter nodes by.",
+    )
+    parser.add_argument(
+        "--list-node-sets",
+        action="store_true",
+        help="Print available node set names as JSON and exit.",
+    )
+    parser.add_argument(
         "--list-fields",
         action="store_true",
         help="Print available field output names as JSON and exit.",
@@ -120,7 +131,13 @@ def _node_coordinates(node):
     return tuple(coordinates[:3])
 
 
-def collect_nodes(odb, instances=None, node_labels=None):
+def list_node_sets(odb):
+    """Return sorted list of node set names in the ODB assembly."""
+    return sorted(odb.rootAssembly.nodeSets.keys())
+
+
+def collect_nodes(odb, instances=None, node_labels=None, node_set_names=None, warnings=None):
+    """Collect NodeRef objects filtered by instance, label, and node set (AND logic)."""
     instance_filter = set(instances or [])
     node_label_filter = set(int(label) for label in (node_labels or []))
     nodes = []
@@ -132,6 +149,25 @@ def collect_nodes(odb, instances=None, node_labels=None):
             if node_label_filter and int(node.label) not in node_label_filter:
                 continue
             nodes.append(NodeRef(instance_name, int(node.label), _node_coordinates(node)))
+
+    if node_set_names:
+        nset_members = set()
+        for nset_name in node_set_names:
+            if nset_name in odb.rootAssembly.nodeSets:
+                nset = odb.rootAssembly.nodeSets[nset_name]
+                for node in nset.nodes:
+                    nset_members.add(
+                        (getattr(node, "instanceName", ""), int(node.label))
+                    )
+            else:
+                if warnings is not None:
+                    warnings.append(
+                        "Node set {!r} not found in ODB.".format(nset_name)
+                    )
+        nodes = [
+            n for n in nodes if (n.instance_name, n.label) in nset_members
+        ]
+
     return sorted(nodes, key=lambda item: (item.instance_name, item.label))
 
 
@@ -475,16 +511,34 @@ def build_metadata(
     return metadata
 
 
+def run_list_node_sets(args):
+    """Print available node sets as JSON and exit."""
+    odb = open_odb_readonly(args.odb)
+    try:
+        node_set_names = list_node_sets(odb)
+        metadata = {
+            "source_odb": os.path.abspath(args.odb),
+            "node_sets": node_set_names,
+        }
+    finally:
+        odb.close()
+    print(json.dumps(metadata, ensure_ascii=False, sort_keys=True))
+    return metadata
+
+
 def run(args):
     odb = open_odb_readonly(args.odb)
     try:
         step_name = choose_step_name(odb, args.step)
         step = odb.steps[step_name]
         node_labels = parse_node_label_values(args.node_labels)
+        node_set_warnings = []
         nodes = collect_nodes(
             odb,
             instances=args.instances,
             node_labels=node_labels,
+            node_set_names=args.node_sets,
+            warnings=node_set_warnings,
         )
         arrays, extraction_metadata = extract_field_arrays(
             step,
@@ -496,6 +550,7 @@ def run(args):
         filters = {
             "instances": list(args.instances or []),
             "node_labels": list(node_labels or []),
+            "node_sets": list(args.node_sets or []),
             "frequency_min": args.frequency_min,
             "frequency_max": args.frequency_max,
         }
@@ -507,6 +562,7 @@ def run(args):
             "fields": list(args.fields or []),
             "instances": list(args.instances or []),
             "node_labels": list(node_labels or []),
+            "node_sets": list(args.node_sets or []),
             "frequency_min": args.frequency_min,
             "frequency_max": args.frequency_max,
         }
@@ -520,6 +576,7 @@ def run(args):
             filters=filters,
             command_options=command_options,
         )
+        extraction_metadata["warnings"].extend(node_set_warnings)
         save_npz(args.output, arrays)
         save_metadata(args.metadata, metadata)
     finally:
@@ -552,6 +609,8 @@ def main(argv=None):
     try:
         if args.list_fields:
             run_list_fields(args)
+        elif args.list_node_sets:
+            run_list_node_sets(args)
         else:
             run(args)
     except OdbAccessUnavailableError as exc:
