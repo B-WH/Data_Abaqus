@@ -14,10 +14,18 @@ import subprocess
 import sys
 import threading
 
+from odb_extract.extractor import default_csv_output_path, parse_csv_component_specs
+
 
 ABAQUS_CANDIDATES = ("abaqus", "abq2024", "abq2023", "abq2022")
 DEFAULT_EXTRACTOR_MODULE = "odb_extract.extractor"
 DEFAULT_FIELD_TEXT = "U UR V VR A AR"
+CSV_COMPONENT_OPTIONS = (
+    ("1", "1方向"),
+    ("2", "2方向"),
+    ("3", "3方向"),
+    ("total", "总和"),
+)
 UI_TEXT = {
     "window_title": "Abaqus ODB 数据提取工具",
     "ready": "就绪",
@@ -38,6 +46,8 @@ UI_TEXT = {
     "frequency_max": "频率上限",
     "refresh_fields": "读取场输出",
     "available_fields": "可用场输出",
+    "csv_components": "CSV 分量",
+    "csv_component_hint": "读取场输出后可选择 CSV 输出方向。",
     "field_hint": "请选择 ODB 文件以读取场输出。",
     "run_button": "开始提取",
     "browse": "浏览",
@@ -100,6 +110,12 @@ def parse_args(argv=None):
     parser.add_argument("--odb", help="ODB file to extract. Opens a file picker if omitted.")
     parser.add_argument("--output", help="Optional NPZ output path.")
     parser.add_argument("--metadata", help="Optional metadata JSON output path.")
+    parser.add_argument("--csv-output", help="Optional node set long-table CSV output path.")
+    parser.add_argument(
+        "--csv-components",
+        nargs="+",
+        help="Optional CSV component selections, e.g. V=1,2,3,total.",
+    )
     parser.add_argument("--step", help="Optional Abaqus step name.")
     parser.add_argument("--fields", nargs="+", help="Optional field names, e.g. U V A.")
     parser.add_argument("--instances", nargs="+", help="Optional instance names to include.")
@@ -138,7 +154,18 @@ def parse_args(argv=None):
 
 
 def default_extractor_module():
-    return DEFAULT_EXTRACTOR_MODULE
+    base_dir = getattr(sys, "_MEIPASS", None)
+    if base_dir is None:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_dir, "odb_extract", "extractor.py")
+
+
+def _abaqus_python_target_args(extractor_target):
+    if extractor_target.endswith(".py") or os.path.sep in extractor_target:
+        return [extractor_target]
+    if os.path.altsep and os.path.altsep in extractor_target:
+        return [extractor_target]
+    return ["-m", extractor_target]
 
 
 def parse_field_text(field_text):
@@ -159,6 +186,16 @@ def parse_node_set_text(text):
     """Parse space/comma/semicolon separated node set names from user input."""
     names = [part for part in re.split(r"[\s,;]+", text.strip()) if part]
     return names or None
+
+
+def format_csv_component_specs(csv_components):
+    if not csv_components:
+        return []
+    return [
+        "{}={}".format(field_name, ",".join(csv_components[field_name]))
+        for field_name in sorted(csv_components)
+        if csv_components[field_name]
+    ]
 
 
 def parse_optional_float(value_text):
@@ -247,9 +284,13 @@ def build_extraction_command(
     frequency_min=None,
     frequency_max=None,
     node_sets=None,
+    csv_output_path=None,
+    csv_components=None,
 ):
     extractor_module = extractor_module or default_extractor_module()
-    command = [abaqus_command, "python", "-m", extractor_module, "--odb", odb_path]
+    command = [abaqus_command, "python"]
+    command.extend(_abaqus_python_target_args(extractor_module))
+    command.extend(["--odb", odb_path])
     if output_path:
         command.extend(["--output", output_path])
     if metadata_path:
@@ -272,6 +313,12 @@ def build_extraction_command(
     if node_sets:
         command.append("--node-sets")
         command.extend(node_sets)
+    if csv_output_path:
+        command.extend(["--csv-output", csv_output_path])
+    component_specs = format_csv_component_specs(csv_components)
+    if component_specs:
+        command.append("--csv-components")
+        command.extend(component_specs)
     return command
 
 
@@ -280,12 +327,9 @@ def build_field_list_command(abaqus_command, extractor_module, odb_path, step_na
     command = [
         abaqus_command,
         "python",
-        "-m",
-        extractor_module,
-        "--odb",
-        odb_path,
-        "--list-fields",
     ]
+    command.extend(_abaqus_python_target_args(extractor_module))
+    command.extend(["--odb", odb_path, "--list-fields"])
     if step_name:
         command.extend(["--step", step_name])
     return command
@@ -307,15 +351,13 @@ def parse_field_list_output(output_text):
 def build_node_set_list_command(abaqus_command, extractor_module, odb_path):
     """Build the Abaqus command to list available node sets."""
     extractor_module = extractor_module or default_extractor_module()
-    return [
+    command = [
         abaqus_command,
         "python",
-        "-m",
-        extractor_module,
-        "--odb",
-        odb_path,
-        "--list-node-sets",
     ]
+    command.extend(_abaqus_python_target_args(extractor_module))
+    command.extend(["--odb", odb_path, "--list-node-sets"])
+    return command
 
 
 def parse_node_set_list_output(output_text):
@@ -415,6 +457,8 @@ def run_extraction(
     frequency_min=None,
     frequency_max=None,
     node_sets=None,
+    csv_output_path=None,
+    csv_components=None,
     runner=None,
     verbose=True,
     log_callback=None,
@@ -433,6 +477,8 @@ def run_extraction(
         frequency_min=frequency_min,
         frequency_max=frequency_max,
         node_sets=node_sets,
+        csv_output_path=csv_output_path,
+        csv_components=csv_components,
     )
     if verbose:
         print(
@@ -466,6 +512,8 @@ def run_workflow(
     frequency_min=None,
     frequency_max=None,
     node_sets=None,
+    csv_output_path=None,
+    csv_components=None,
     points_path=None,
     point_output_path=None,
     point_fields=None,
@@ -481,6 +529,11 @@ def run_workflow(
         output_path = output_path or default_npz
         metadata_path = metadata_path or default_metadata
         point_output_path = point_output_path or default_point_output_path(odb_path)
+    if node_sets:
+        default_npz, default_metadata = default_output_paths(odb_path)
+        output_path = output_path or default_npz
+        metadata_path = metadata_path or default_metadata
+        csv_output_path = csv_output_path or default_csv_output_path(output_path)
 
     if log_callback:
         log_callback(UI_TEXT["starting_extraction"])
@@ -499,6 +552,8 @@ def run_workflow(
         frequency_min=frequency_min,
         frequency_max=frequency_max,
         node_sets=node_sets,
+        csv_output_path=csv_output_path,
+        csv_components=csv_components,
         verbose=verbose,
         log_callback=log_callback,
     )
@@ -515,6 +570,7 @@ def run_workflow(
         points_path=points_path,
         output_path=point_output_path,
         fields=point_fields,
+        csv_components=csv_components,
         neighbors=neighbors,
         exact_tol=exact_tol,
     )
@@ -540,6 +596,7 @@ def run_cli(argv=None):
             file=sys.stderr,
         )
         return 2
+    csv_components = parse_csv_component_specs(args.csv_components)
 
     return run_workflow(
         abaqus_command=abaqus_command,
@@ -554,6 +611,8 @@ def run_cli(argv=None):
         frequency_min=args.frequency_min,
         frequency_max=args.frequency_max,
         node_sets=args.node_sets,
+        csv_output_path=args.csv_output,
+        csv_components=csv_components,
         points_path=args.points,
         point_output_path=args.point_output,
         point_fields=args.point_fields,
@@ -590,6 +649,7 @@ class ExtractOdbApp(object):
         self.status_var = tk.StringVar(value=UI_TEXT["ready"])
         self._running = False
         self.field_vars = {}
+        self.csv_component_vars = {}
         self.node_sets_var = tk.StringVar()
         self.node_set_vars = {}
 
@@ -602,8 +662,24 @@ class ExtractOdbApp(object):
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
 
-        frame = ttk.Frame(self.root, padding=12)
-        frame.grid(row=0, column=0, sticky="nsew")
+        self.main_canvas = tk.Canvas(self.root, highlightthickness=0)
+        self.main_canvas.grid(row=0, column=0, sticky="nsew")
+        main_scrollbar = ttk.Scrollbar(
+            self.root,
+            orient="vertical",
+            command=self.main_canvas.yview,
+        )
+        main_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.main_canvas.configure(yscrollcommand=main_scrollbar.set)
+
+        frame = ttk.Frame(self.main_canvas, padding=12)
+        self.main_canvas_window = self.main_canvas.create_window(
+            (0, 0),
+            window=frame,
+            anchor="nw",
+        )
+        frame.bind("<Configure>", self._update_main_scroll_region)
+        self.main_canvas.bind("<Configure>", self._resize_main_frame)
         frame.columnconfigure(1, weight=1)
         frame.rowconfigure(19, weight=1)
 
@@ -739,8 +815,10 @@ class ExtractOdbApp(object):
         )
         self.field_hint.grid(row=0, column=0, sticky="w", padx=8, pady=8)
 
+        self._build_csv_component_widgets(frame, 17)
+
         button_bar = ttk.Frame(frame)
-        button_bar.grid(row=17, column=0, columnspan=3, sticky="ew", pady=(8, 6))
+        button_bar.grid(row=18, column=0, columnspan=3, sticky="ew", pady=(8, 6))
         self.run_button = ttk.Button(button_bar, text=UI_TEXT["run_button"], command=self.run)
         self.run_button.pack(side="left")
         ttk.Label(button_bar, textvariable=self.status_var).pack(side="left", padx=12)
@@ -765,8 +843,29 @@ class ExtractOdbApp(object):
                 row=row, column=2, sticky="ew", pady=4
             )
 
+    def _build_csv_component_widgets(self, frame, row):
+        from tkinter import ttk
+
+        self.csv_component_box = ttk.LabelFrame(frame, text=UI_TEXT["csv_components"])
+        self.csv_component_box.grid(
+            row=row, column=0, columnspan=3, sticky="ew", pady=(0, 8)
+        )
+        self.csv_component_frame = ttk.Frame(self.csv_component_box)
+        self.csv_component_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
+        self.csv_component_hint = ttk.Label(
+            self.csv_component_frame,
+            text=UI_TEXT["csv_component_hint"],
+        )
+        self.csv_component_hint.grid(row=0, column=0, sticky="w")
+
+    def _clear_csv_component_checks(self):
+        for child in self.csv_component_frame.winfo_children():
+            child.destroy()
+        self.csv_component_vars = {}
+
     def _build_node_set_widgets(self, frame, row_offset):
         """Build node set filter row: label, text entry, and action buttons."""
+        tk = self.tk
         from tkinter import ttk
 
         ttk.Label(frame, text=UI_TEXT["node_set_filter"]).grid(
@@ -933,6 +1032,12 @@ class ExtractOdbApp(object):
             button.configure(state="disabled" if running else "normal")
         self.status_var.set(UI_TEXT["running"] if running else UI_TEXT["ready"])
 
+    def _update_main_scroll_region(self, _event=None):
+        self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+
+    def _resize_main_frame(self, event):
+        self.main_canvas.itemconfigure(self.main_canvas_window, width=event.width)
+
     def _update_field_scroll_region(self, _event=None):
         self.field_canvas.configure(scrollregion=self.field_canvas.bbox("all"))
 
@@ -1001,6 +1106,37 @@ class ExtractOdbApp(object):
             child.destroy()
         self.field_vars = {}
 
+    def _show_csv_component_matrix(self, fields):
+        tk = self.tk
+        from tkinter import ttk
+
+        self._clear_csv_component_checks()
+        if not fields:
+            ttk.Label(
+                self.csv_component_frame,
+                text=UI_TEXT["csv_component_hint"],
+            ).grid(row=0, column=0, sticky="w")
+            return
+
+        ttk.Label(self.csv_component_frame, text="").grid(row=0, column=0, padx=6, pady=2)
+        for column, field_name in enumerate(fields, start=1):
+            ttk.Label(self.csv_component_frame, text=field_name).grid(
+                row=0, column=column, padx=6, pady=2
+            )
+            self.csv_component_vars[field_name] = {}
+
+        for row, (key, label) in enumerate(CSV_COMPONENT_OPTIONS, start=1):
+            ttk.Label(self.csv_component_frame, text=label).grid(
+                row=row, column=0, sticky="w", padx=6, pady=2
+            )
+            for column, field_name in enumerate(fields, start=1):
+                variable = tk.BooleanVar(value=key != "total")
+                self.csv_component_vars[field_name][key] = variable
+                ttk.Checkbutton(
+                    self.csv_component_frame,
+                    variable=variable,
+                ).grid(row=row, column=column, padx=6, pady=2)
+
     def _set_field_selection(self, mode):
         selected = set(choose_field_names(self.field_vars.keys(), mode))
         for field_name, variable in self.field_vars.items():
@@ -1021,11 +1157,13 @@ class ExtractOdbApp(object):
 
         fields = metadata.get("fields", [])
         self._clear_field_checks()
+        self._clear_csv_component_checks()
         if not fields:
             ttk.Label(self.field_checks_frame, text=UI_TEXT["no_fields_found"]).grid(
                 row=0, column=0, sticky="w", padx=8, pady=8
             )
             self.fields_var.set("")
+            self._show_csv_component_matrix([])
             return
 
         default_fields = set(parse_field_text(DEFAULT_FIELD_TEXT) or [])
@@ -1046,6 +1184,7 @@ class ExtractOdbApp(object):
             for variable in self.field_vars.values():
                 variable.set(True)
         self._sync_fields_from_checks()
+        self._show_csv_component_matrix(fields)
         self.field_canvas.yview_moveto(0)
         self.log(UI_TEXT["found_fields"].format(step=metadata.get("step", ""), count=len(fields)))
 
@@ -1161,6 +1300,24 @@ class ExtractOdbApp(object):
             ]
         return parse_field_text(self.fields_var.get())
 
+    def _selected_csv_components(self, fields):
+        csv_component_vars = getattr(self, "csv_component_vars", {})
+        if not csv_component_vars or not fields:
+            return None
+        selections = {}
+        for field_name in fields:
+            component_vars = csv_component_vars.get(field_name)
+            if not component_vars:
+                continue
+            selected = [
+                key
+                for key, _label in CSV_COMPONENT_OPTIONS
+                if key in component_vars and component_vars[key].get()
+            ]
+            if selected:
+                selections[field_name] = selected
+        return selections or None
+
     def _validate_inputs(self):
         from tkinter import messagebox
 
@@ -1227,6 +1384,7 @@ class ExtractOdbApp(object):
         points_path = self.points_var.get().strip() or None
         point_output_path = self.point_output_var.get().strip() or None
         point_fields = parse_field_text(self.point_fields_var.get())
+        csv_components = self._selected_csv_components(fields)
         return {
             "abaqus_command": abaqus_command,
             "odb_path": odb_path,
@@ -1240,6 +1398,7 @@ class ExtractOdbApp(object):
             "frequency_min": frequency_min,
             "frequency_max": frequency_max,
             "node_sets": node_sets,
+            "csv_components": csv_components,
             "points_path": points_path,
             "point_output_path": point_output_path,
             "point_fields": point_fields,

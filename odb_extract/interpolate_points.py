@@ -10,6 +10,12 @@ import sys
 
 import numpy as np
 
+from odb_extract.extractor import (
+    csv_component_items,
+    csv_total_values,
+    parse_csv_component_specs,
+)
+
 
 OUTPUT_COLUMNS = [
     "point_id",
@@ -37,6 +43,12 @@ def parse_args(argv=None):
     parser.add_argument("--points", required=True, help="CSV containing point_id,x,y,z rows.")
     parser.add_argument("--output", required=True, help="Output CSV path.")
     parser.add_argument("--fields", nargs="+", default=None, help="Optional field names.")
+    parser.add_argument(
+        "--csv-components",
+        nargs="+",
+        default=None,
+        help="Optional CSV component selections, e.g. V=1,2,3,total.",
+    )
     parser.add_argument("--neighbors", type=int, default=4, help="Neighbor count for interpolation.")
     parser.add_argument(
         "--exact-tol",
@@ -197,6 +209,7 @@ def interpolate_files(
     points_path,
     output_path,
     fields=None,
+    csv_components=None,
     neighbors=4,
     exact_tol=1.0e-9,
 ):
@@ -219,6 +232,11 @@ def interpolate_files(
         ]
         real_data = np.asarray(data["{}_real".format(field_name)], dtype=float)
         imag_data = np.asarray(data["{}_imag".format(field_name)], dtype=float)
+        output_items = csv_component_items(
+            field_name,
+            components,
+            None if csv_components is None else csv_components.get(field_name),
+        )
 
         for point in query_points:
             indices, weights, distances, method = _neighbor_weights(
@@ -231,7 +249,15 @@ def interpolate_files(
             imag_values = _weighted_values(imag_data, indices, weights)
             neighbor_labels = node_labels[indices].tolist()
             for frame_index, frequency in enumerate(frequencies):
-                for component_index, component in enumerate(components):
+                for item_type, component_index, component in output_items:
+                    if item_type == "total":
+                        real, imag = csv_total_values(
+                            real_values[frame_index],
+                            imag_values[frame_index],
+                        )
+                    else:
+                        real = real_values[frame_index, component_index]
+                        imag = imag_values[frame_index, component_index]
                     rows.append(
                         {
                             "point_id": point["point_id"],
@@ -241,8 +267,8 @@ def interpolate_files(
                             "frequency": _float_text(frequency),
                             "field": field_name,
                             "component": str(component),
-                            "real": _float_text(real_values[frame_index, component_index]),
-                            "imag": _float_text(imag_values[frame_index, component_index]),
+                            "real": _float_text(real),
+                            "imag": _float_text(imag),
                             "method": method,
                             "neighbor_labels": ";".join(str(int(label)) for label in neighbor_labels),
                             "neighbor_weights": _joined_float_text(weights),
@@ -263,6 +289,7 @@ def main(argv=None):
             points_path=args.points,
             output_path=args.output,
             fields=args.fields,
+            csv_components=parse_csv_component_specs(args.csv_components),
             neighbors=args.neighbors,
             exact_tol=args.exact_tol,
         )

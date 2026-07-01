@@ -1,12 +1,14 @@
 """Extract nodal frequency-response data from an Abaqus ODB file.
 
 Run with Abaqus Python, for example:
-    abaqus python -m odb_extract.extractor --odb data\\test1.odb
+    abaqus python .\\odb_extract\\extractor.py --odb data\\test1.odb
 """
 
 from __future__ import print_function
 
 import argparse
+import csv
+import io
 import importlib
 import json
 import os
@@ -21,6 +23,7 @@ DEFAULT_METADATA = os.path.join("output", "test1_point_metadata.json")
 DEFAULT_FIELDS = ("U", "UR", "V", "VR", "A", "AR")
 TOOL_NAME = "odb_extract.extractor"
 METADATA_SCHEMA_VERSION = 1
+CSV_COMPONENT_KEYS = ("1", "2", "3", "total")
 
 NodeRef = namedtuple("NodeRef", ["instance_name", "label", "coordinates"])
 
@@ -42,6 +45,17 @@ def parse_args(argv=None):
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Output NPZ file path.")
     parser.add_argument(
         "--metadata", default=DEFAULT_METADATA, help="Output metadata JSON file path."
+    )
+    parser.add_argument(
+        "--csv-output",
+        default=None,
+        help="Optional node set long-table CSV output path.",
+    )
+    parser.add_argument(
+        "--csv-components",
+        nargs="+",
+        default=None,
+        help="Optional CSV component selections, e.g. V=1,2,3,total.",
     )
     parser.add_argument(
         "--fields",
@@ -95,12 +109,12 @@ def parse_args(argv=None):
 def open_odb_readonly(path):
     try:
         odb_access = importlib.import_module("odbAccess")
-    except ImportError as exc:
+    except ImportError:
         raise OdbAccessUnavailableError(
             "Abaqus module 'odbAccess' is not available in this Python environment. "
             "Run this script with Abaqus Python, for example: "
-            "abaqus python -m odb_extract.extractor --odb data\\test1.odb"
-        ) from exc
+            "abaqus python .\\odb_extract\\extractor.py --odb data\\test1.odb"
+        )
     return odb_access.openOdb(path=path, readOnly=True)
 
 
@@ -108,10 +122,28 @@ def _numpy():
     return importlib.import_module("numpy")
 
 
+def _full_array(np, shape, fill_value, dtype=float):
+    array = np.empty(shape, dtype=dtype)
+    array.fill(fill_value)
+    return array
+
+
+def _now_iso_seconds():
+    return datetime.now().replace(microsecond=0).isoformat()
+
+
 def ensure_parent_dir(path):
     parent = os.path.dirname(os.path.abspath(path))
     if parent and not os.path.isdir(parent):
         os.makedirs(parent)
+
+
+def default_csv_output_path(output_path):
+    base_path, _extension = os.path.splitext(output_path)
+    suffix = "_point_data"
+    if base_path.endswith(suffix):
+        base_path = base_path[: -len(suffix)]
+    return "{}_node_set_data.csv".format(base_path)
 
 
 def parse_node_label_values(values):
@@ -122,6 +154,31 @@ def parse_node_label_values(values):
         for part in str(value).replace(",", " ").replace(";", " ").split():
             labels.append(int(part))
     return labels or None
+
+
+def parse_csv_component_specs(specs):
+    if not specs:
+        return None
+    selections = {}
+    for spec in specs:
+        if "=" not in spec:
+            raise ValueError(
+                "CSV component selection must use FIELD=1,2,3,total syntax."
+            )
+        field_name, values_text = spec.split("=", 1)
+        field_name = field_name.strip()
+        values = [
+            value.strip().lower()
+            for value in values_text.replace(";", ",").split(",")
+            if value.strip()
+        ]
+        invalid = [value for value in values if value not in CSV_COMPONENT_KEYS]
+        if not field_name or invalid:
+            raise ValueError(
+                "Invalid CSV component selection {!r}.".format(spec)
+            )
+        selections[field_name] = values
+    return selections or None
 
 
 def _node_coordinates(node):
@@ -155,10 +212,8 @@ def collect_nodes(odb, instances=None, node_labels=None, node_set_names=None, wa
         for nset_name in node_set_names:
             if nset_name in odb.rootAssembly.nodeSets:
                 nset = odb.rootAssembly.nodeSets[nset_name]
-                for node in nset.nodes:
-                    nset_members.add(
-                        (getattr(node, "instanceName", ""), int(node.label))
-                    )
+                for instance_name, label in _node_set_members(nset):
+                    nset_members.add((instance_name, label))
             else:
                 if warnings is not None:
                     warnings.append(
@@ -169,6 +224,16 @@ def collect_nodes(odb, instances=None, node_labels=None, node_set_names=None, wa
         ]
 
     return sorted(nodes, key=lambda item: (item.instance_name, item.label))
+
+
+def _node_set_members(nset):
+    for item in nset.nodes:
+        if hasattr(item, "label"):
+            yield getattr(item, "instanceName", ""), int(item.label)
+            continue
+        instance_name = getattr(item, "instanceName", "")
+        for node in item:
+            yield getattr(node, "instanceName", instance_name), int(node.label)
 
 
 def choose_step_name(odb, requested_step=None):
@@ -400,10 +465,12 @@ def extract_field_arrays(step, nodes, fields, frequency_min=None, frequency_max=
         array_layout = _array_layout_for_location(location)
         real_key = "{}_real".format(field_name)
         imag_key = "{}_imag".format(field_name)
-        real_data = np.full(
+        real_data = _full_array(
+            np,
             (len(frames), len(point_keys), component_count), np.nan, dtype=float
         )
-        imag_data = np.full(
+        imag_data = _full_array(
+            np,
             (len(frames), len(point_keys), component_count), np.nan, dtype=float
         )
 
@@ -464,8 +531,138 @@ def save_npz(output_path, arrays):
 
 def save_metadata(metadata_path, metadata):
     ensure_parent_dir(metadata_path)
-    with open(metadata_path, "w", encoding="utf-8") as stream:
+    with io.open(metadata_path, "w", encoding="utf-8") as stream:
         json.dump(metadata, stream, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _open_csv_for_write(path):
+    ensure_parent_dir(path)
+    if sys.version_info[0] < 3:
+        return open(path, "wb")
+    return open(path, "w", newline="", encoding="utf-8")
+
+
+def csv_component_items(field_name, components, selection=None, warnings=None):
+    if not selection:
+        return [
+            ("component", index, component)
+            for index, component in enumerate(components)
+        ]
+
+    items = []
+    for token in selection:
+        token = str(token).lower()
+        if token == "total":
+            if len(components) < 3:
+                if warnings is not None:
+                    warnings.append(
+                        "Field {} has fewer than 3 components; skipped total CSV export.".format(
+                            field_name
+                        )
+                    )
+                continue
+            items.append(("total", None, "{}_total".format(field_name)))
+            continue
+
+        index = int(token) - 1
+        if 0 <= index < len(components):
+            items.append(("component", index, components[index]))
+        elif warnings is not None:
+            warnings.append(
+                "Field {} does not have component {}; skipped CSV export.".format(
+                    field_name,
+                    token,
+                )
+            )
+    return items
+
+
+def csv_total_values(real_values, imag_values):
+    real = sum(float(value) ** 2 for value in real_values[:3]) ** 0.5
+    imag = sum(float(value) ** 2 for value in imag_values[:3]) ** 0.5
+    return real, imag
+
+
+def save_node_set_csv(csv_path, arrays, metadata, csv_components=None):
+    headers = [
+        "frequency_index",
+        "frequency",
+        "instance",
+        "node_label",
+        "x",
+        "y",
+        "z",
+        "field",
+        "component",
+        "real",
+        "imag",
+    ]
+    warnings = metadata.setdefault("warnings", [])
+    nodes = metadata.get("nodes", [])
+    field_outputs = metadata.get("field_outputs", {})
+    array_layouts = metadata.get("array_layouts", {})
+
+    with _open_csv_for_write(csv_path) as stream:
+        writer = csv.writer(stream)
+        writer.writerow(headers)
+        for field_name in metadata.get("fields", []):
+            real_key = "{}_real".format(field_name)
+            imag_key = "{}_imag".format(field_name)
+            field_metadata = field_outputs.get(field_name, {})
+            layout = field_metadata.get("array_layout") or array_layouts.get(real_key)
+            if layout != ["frame", "node", "component"]:
+                warnings.append(
+                    "Field {} is not a node field; skipped CSV export.".format(
+                        field_name
+                    )
+                )
+                continue
+            if real_key not in arrays or imag_key not in arrays:
+                warnings.append(
+                    "Field {} arrays are missing; skipped CSV export.".format(field_name)
+                )
+                continue
+
+            real_data = arrays[real_key]
+            imag_data = arrays[imag_key]
+            components = field_metadata.get("components") or [
+                "component_{}".format(index + 1)
+                for index in range(real_data.shape[2])
+            ]
+            output_items = csv_component_items(
+                field_name,
+                components,
+                None if csv_components is None else csv_components.get(field_name),
+                warnings=warnings,
+            )
+            for frequency_index, frequency in enumerate(arrays["frequencies"]):
+                for node_index, node in enumerate(nodes):
+                    coordinates = list(node.get("coordinates", []))
+                    coordinates.extend([0.0] * (3 - len(coordinates)))
+                    for item_type, component_index, component in output_items:
+                        if item_type == "total":
+                            real, imag = csv_total_values(
+                                real_data[frequency_index, node_index],
+                                imag_data[frequency_index, node_index],
+                            )
+                        else:
+                            real = real_data[frequency_index, node_index, component_index]
+                            imag = imag_data[frequency_index, node_index, component_index]
+                        writer.writerow(
+                            [
+                                frequency_index,
+                                float(frequency),
+                                node.get("instance", ""),
+                                int(node.get("label", arrays["node_labels"][node_index])),
+                                float(coordinates[0]),
+                                float(coordinates[1]),
+                                float(coordinates[2]),
+                                field_name,
+                                component,
+                                float(real),
+                                float(imag),
+                            ]
+                        )
 
 
 def build_metadata(
@@ -486,7 +683,7 @@ def build_metadata(
         "source_odb": os.path.abspath(odb_path),
         "step": step_name,
         "fields": list(fields),
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": _now_iso_seconds(),
         "node_count": len(nodes),
         "nodes": [
             {
@@ -554,10 +751,15 @@ def run(args):
             "frequency_min": args.frequency_min,
             "frequency_max": args.frequency_max,
         }
+        csv_output = args.csv_output
+        if args.node_sets and not csv_output:
+            csv_output = default_csv_output_path(args.output)
         command_options = {
             "odb": args.odb,
             "output": args.output,
             "metadata": args.metadata,
+            "csv_output": csv_output,
+            "csv_components": list(args.csv_components or []),
             "step": args.step,
             "fields": list(args.fields or []),
             "instances": list(args.instances or []),
@@ -578,10 +780,19 @@ def run(args):
         )
         extraction_metadata["warnings"].extend(node_set_warnings)
         save_npz(args.output, arrays)
+        if csv_output:
+            save_node_set_csv(
+                csv_output,
+                arrays,
+                metadata,
+                csv_components=parse_csv_component_specs(args.csv_components),
+            )
         save_metadata(args.metadata, metadata)
     finally:
         odb.close()
     print("Saved NPZ: {}".format(args.output))
+    if csv_output:
+        print("Saved CSV: {}".format(csv_output))
     print("Saved metadata: {}".format(args.metadata))
     if metadata["warnings"]:
         print("Warnings: {}".format(len(metadata["warnings"])))

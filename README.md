@@ -5,13 +5,13 @@
 ## 程序边界
 
 - `python -m odb_extract` 是普通 Python 入口，负责 GUI、参数校验、调用 Abaqus 命令和后处理串联。
-- `odb_extract.extractor` 必须由 Abaqus Python 执行，负责实际读取 `.odb`。
+- `odb_extract.extractor` 必须由 Abaqus Python 执行，负责实际读取 `.odb`；启动器会自动用脚本绝对路径调用它，因此可从项目目录以外启动。
 - `odb_extract.interpolate_points` 是普通 Python 后处理脚本，读取已导出的 NPZ、metadata JSON 和目标点 CSV。
 
-普通 Python 不能直接导入 Abaqus 的 `odbAccess`。如果直接运行 `odb_extract.extractor` 时提示缺少 `odbAccess`，应改用 Abaqus Python，例如：
+普通 Python 不能直接导入 Abaqus 的 `odbAccess`。如果手动运行提取脚本，应改用 Abaqus Python，例如：
 
 ```powershell
-abaqus python -m odb_extract.extractor --odb data\test1.odb
+abaqus python .\odb_extract\extractor.py --odb data\test1.odb
 ```
 
 ## 推荐用法
@@ -19,27 +19,40 @@ abaqus python -m odb_extract.extractor --odb data\test1.odb
 双击或运行启动器时，不带参数会打开 GUI：
 
 ```powershell
-python python -m odb_extract
+python -m odb_extract
 ```
 
 GUI 中通常按以下顺序操作：
 
 1. 选择 `.odb` 文件。
 2. 点击“读取场输出”，勾选需要导出的字段。
-3. 按需填写实例、节点编号、频率范围过滤。
-4. 如需按坐标取点，选择目标点 CSV，并确认目标点输出 CSV 路径。
-5. 点击“开始提取”。
+3. 按需填写实例、节点编号、节点集、频率范围过滤。
+4. 在“CSV 分量”中按字段选择 1/2/3 方向或总和；默认输出 1/2/3 方向。
+5. 如需按坐标取点，选择目标点 CSV，并确认目标点输出 CSV 路径。
+6. 点击“开始提取”。
 
 CLI 仍保留用于自动化：
 
 ```powershell
-python python -m odb_extract --odb data\test1.odb --fields U V A
+python -m odb_extract --odb data\test1.odb --fields U V A
 ```
 
 带目标点导出：
 
 ```powershell
-python python -m odb_extract --odb data\test1.odb --points points.csv --point-fields U V
+python -m odb_extract --odb data\test1.odb --points points.csv --point-fields U V
+```
+
+按节点集导出时会自动额外生成 CSV 长表：
+
+```powershell
+python -m odb_extract --odb data\test1.odb --node-sets NSET_TOP
+```
+
+只在 CSV 中输出 `V1` 和总速度：
+
+```powershell
+python -m odb_extract --odb data\test1.odb --node-sets NSET_TOP --csv-components V=1,total
 ```
 
 ## 目标点 CSV 格式
@@ -58,7 +71,12 @@ p2,1.0,0.0,0.0
 
 - `*_point_data.npz`：数值数组，包括频率、节点标签、节点坐标、各字段实部和虚部。
 - `*_point_metadata.json`：字段、节点、坐标、数组布局、过滤条件和 warning 信息。
+- `*_node_set_data.csv`：按节点集导出时自动生成的长表，列为 `frequency_index,frequency,instance,node_label,x,y,z,field,component,real,imag`。
 - `*_interpolated_points.csv`：目标点长表结果。
+
+节点集 CSV 只写入节点布局字段（`frame,node,component`）。单元场或积分点场仍保留在 NPZ/metadata 中，并在 metadata 的 `warnings` 中记录 CSV 跳过原因。
+
+CSV 分量选择只影响 `*_node_set_data.csv` 和 `*_interpolated_points.csv`，不裁剪 NPZ。`总和` 行的 `component` 为 `<field>_total`，例如 `V_total`；其实部和虚部分别按前三个方向平方和开方计算。
 
 目标点 CSV 输出中的 `method` 表示取值方式：
 
@@ -85,12 +103,12 @@ python -m unittest tests.test_extract_data_odb tests.test_interpolate_odb_points
 
 ## 打包注意
 
-如果使用 PyInstaller 打包，必须把以下脚本包含进包内：
+如果使用 PyInstaller 打包，必须把外部 Abaqus Python 需要执行的提取脚本包含进包内：
 
-- `odb_extract.extractor`
-- `odb_extract.interpolate_points`
+- `odb_extract/extractor.py`
 
-`Extract_ODB.spec` 当前可能被 `.gitignore` 忽略；检查打包配置时应显式查看该文件内容。
+`Extract_ODB.spec` 已配置该文件；修改提取脚本后需要重新打包。
+
 ## STEP/STP/INS geometry to Abaqus INP mesh conversion
 
 This repository also includes `mesh_convert`, an independent command-line program

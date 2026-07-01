@@ -99,6 +99,39 @@ class InterpolateOdbPointsTests(unittest.TestCase):
         with open(self.metadata_path, "w", encoding="utf-8") as stream:
             json.dump(metadata, stream)
 
+    def _write_three_component_v_inputs(self):
+        np.savez_compressed(
+            self.data_path,
+            frequencies=np.array([5.0]),
+            node_labels=np.array([1]),
+            node_coordinates=np.array([[0.0, 0.0, 0.0]], dtype=float),
+            V_real=np.array([[[3.0, 4.0, 12.0]]]),
+            V_imag=np.array([[[1.0, 2.0, 2.0]]]),
+        )
+        metadata = {
+            "fields": ["V"],
+            "frequencies": [5.0],
+            "nodes": [
+                {"instance": "PART-1-1", "label": 1, "coordinates": [0.0, 0.0, 0.0]},
+            ],
+            "array_layouts": {
+                "frequencies": ["frame"],
+                "node_labels": ["node"],
+                "node_coordinates": ["node", "coordinate"],
+                "V_real": ["frame", "node", "component"],
+                "V_imag": ["frame", "node", "component"],
+            },
+            "field_outputs": {
+                "V": {
+                    "location": "NODE",
+                    "components": ["V1", "V2", "V3"],
+                    "points": [{"instance": "PART-1-1", "node_label": 1}],
+                },
+            },
+        }
+        with open(self.metadata_path, "w", encoding="utf-8") as stream:
+            json.dump(metadata, stream)
+
     def _write_points(self, rows):
         with open(self.points_path, "w", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=["point_id", "x", "y", "z"])
@@ -186,6 +219,26 @@ class InterpolateOdbPointsTests(unittest.TestCase):
         rows = self._read_output()
         self.assertEqual([row["field"] for row in rows], ["V"])
         self.assertEqual(float(rows[0]["real"]), 100.0)
+
+    def test_csv_components_filter_and_total_output(self):
+        self._write_three_component_v_inputs()
+        self._write_points([{"point_id": "p1", "x": "0.0", "y": "0.0", "z": "0.0"}])
+
+        interp.interpolate_files(
+            data_path=self.data_path,
+            metadata_path=self.metadata_path,
+            points_path=self.points_path,
+            output_path=self.output_path,
+            fields=["V"],
+            csv_components={"V": ["2", "total"]},
+        )
+
+        rows = self._read_output()
+        self.assertEqual([row["component"] for row in rows], ["V2", "V_total"])
+        self.assertEqual(float(rows[0]["real"]), 4.0)
+        self.assertEqual(float(rows[0]["imag"]), 2.0)
+        self.assertEqual(float(rows[1]["real"]), 13.0)
+        self.assertEqual(float(rows[1]["imag"]), 3.0)
 
     def test_default_fields_skip_non_node_outputs(self):
         self._write_points([{"point_id": "p1", "x": "0.0", "y": "0.0", "z": "0.0"}])
