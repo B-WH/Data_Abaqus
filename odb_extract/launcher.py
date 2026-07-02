@@ -336,16 +336,29 @@ def build_field_list_command(abaqus_command, extractor_module, odb_path, step_na
 
 
 def parse_field_list_output(output_text):
-    for line in output_text.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
+    return _parse_list_metadata_output(
+        output_text,
+        "fields",
+        "Field list JSON does not contain a fields array.",
+        "Could not find field list JSON in Abaqus output.",
+    )
+
+
+def _parse_list_metadata_output(output_text, list_key, malformed_message, missing_message):
+    decoder = json.JSONDecoder()
+    start = output_text.find("{")
+    while start >= 0:
+        try:
+            metadata, _ = decoder.raw_decode(output_text[start:])
+        except ValueError:
+            start = output_text.find("{", start + 1)
             continue
-        metadata = json.loads(line)
-        fields = metadata.get("fields")
-        if not isinstance(fields, list):
-            raise ValueError("Field list JSON does not contain a fields array.")
-        return metadata
-    raise ValueError("Could not find field list JSON in Abaqus output.")
+        if isinstance(metadata, dict) and list_key in metadata:
+            if not isinstance(metadata.get(list_key), list):
+                raise ValueError(malformed_message)
+            return metadata
+        start = output_text.find("{", start + 1)
+    raise ValueError(missing_message)
 
 
 def build_node_set_list_command(abaqus_command, extractor_module, odb_path):
@@ -362,16 +375,12 @@ def build_node_set_list_command(abaqus_command, extractor_module, odb_path):
 
 def parse_node_set_list_output(output_text):
     """Parse the JSON line from --list-node-sets output."""
-    for line in output_text.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        metadata = json.loads(line)
-        node_sets = metadata.get("node_sets")
-        if not isinstance(node_sets, list):
-            raise ValueError("Node set list JSON does not contain a node_sets array.")
-        return metadata
-    raise ValueError("Could not find node set list JSON in Abaqus output.")
+    return _parse_list_metadata_output(
+        output_text,
+        "node_sets",
+        "Node set list JSON does not contain a node_sets array.",
+        "Could not find node set list JSON in Abaqus output.",
+    )
 
 
 def discover_node_sets(abaqus_command, extractor_module, odb_path, runner=None):

@@ -224,6 +224,20 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(metadata["fields"], ["A", "U", "V"])
         self.assertEqual(metadata["step"], "Step-1")
 
+    def test_parse_field_list_output_reads_embedded_json(self):
+        metadata = launcher.parse_field_list_output(
+            'Abaqus startup text {"fields": ["U"], "step": "Step-1"}\n'
+        )
+
+        self.assertEqual(metadata["fields"], ["U"])
+
+    def test_parse_node_set_list_output_reads_embedded_json(self):
+        metadata = launcher.parse_node_set_list_output(
+            'Abaqus startup text {"node_sets": ["PROBE_NODE"]}\n'
+        )
+
+        self.assertEqual(metadata["node_sets"], ["PROBE_NODE"])
+
     def test_parse_args_accepts_point_export_options(self):
         args = launcher.parse_args(
             [

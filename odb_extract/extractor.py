@@ -13,6 +13,7 @@ import importlib
 import json
 import os
 import sys
+import time
 from collections import namedtuple
 from datetime import datetime
 
@@ -126,6 +127,42 @@ def _full_array(np, shape, fill_value, dtype=float):
     array = np.empty(shape, dtype=dtype)
     array.fill(fill_value)
     return array
+
+
+def _log_elapsed(label, start_time, now=None):
+    current_time = time.time() if now is None else now
+    print("[timing] {}: {:.3f} s".format(label, current_time - start_time))
+    sys.stdout.flush()
+    return current_time
+
+
+def _create_memmap_array(np, shape, dtype=float):
+    """Create a temporary memory-mapped array to avoid large RAM allocations.
+
+    Returns (array, temp_file_path).  The caller is responsible for
+    deleting the temp file via _cleanup_memmap_files when done.
+    """
+    import tempfile
+
+    fd, path = tempfile.mkstemp(suffix=".dat", prefix="odb_extract_")
+    os.close(fd)
+    # np.memmap on Windows with Python 2 requires a unicode path
+    if sys.version_info[0] < 3 and isinstance(path, bytes):
+        path = path.decode(sys.getfilesystemencoding() or "utf-8")
+    array = np.memmap(path, dtype=dtype, mode="w+", shape=shape)
+    return array, path
+
+
+def _cleanup_memmap_files(paths):
+    """Delete temporary memmap backing files.
+
+    Safe to call with an empty list or paths that no longer exist.
+    """
+    for path in paths:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def _now_iso_seconds():
@@ -409,7 +446,103 @@ def _array_layout_for_location(location):
     return ["frame", "value", "component"]
 
 
+def _collect_field_metadata(step, fields, nodes, frequency_min, frequency_max):
+    """Single-pass metadata collection across all frames.
+
+    Replaces repeated full-frame scans previously done by
+    _component_count_from_step, _field_location_from_step,
+    _collect_field_point_keys, _component_count_for_field, and
+    _component_labels_for_field.
+
+    Returns (frames, frequencies, field_meta, point_keys_map, point_indexes).
+    """
+    np = _numpy()
+
+    field_locations = {}         # field_name -> "NODE" | "ELEMENT" | "VALUE"
+    field_max_components = {}    # field_name -> int
+    field_raw_labels = {}        # field_name -> list of str
+    field_point_sets = {fn: set() for fn in fields}
+
+    filtered_frames = []
+    freq_values = []
+
+    for frame in step.frames:
+        freq = float(frame.frameValue)
+        if frequency_min is not None and freq < frequency_min:
+            continue
+        if frequency_max is not None and freq > frequency_max:
+            continue
+        filtered_frames.append(frame)
+        freq_values.append(freq)
+
+        for field_name in fields:
+            if field_name not in frame.fieldOutputs:
+                continue
+            field = frame.fieldOutputs[field_name]
+            values = _get_field_values(field)
+            if not len(values):
+                continue
+
+            if field_name not in field_locations:
+                field_locations[field_name] = _field_value_key(values[0])[0]
+
+            if field_name not in field_raw_labels:
+                labels = getattr(field, "componentLabels", None)
+                if labels:
+                    field_raw_labels[field_name] = [str(l) for l in labels]
+
+            for ordinal, value in enumerate(values):
+                key = _field_value_key(value, ordinal)
+                field_point_sets[field_name].add(key)
+                n_comp = len(_value_data_tuple(value.data))
+                field_max_components[field_name] = max(
+                    field_max_components.get(field_name, 0), n_comp
+                )
+
+    frequencies = np.asarray(freq_values, dtype=float)
+    default_component_count = (
+        max(field_max_components.values()) if field_max_components else 0
+    )
+
+    field_meta = {}
+    point_keys_map = {}
+    point_indexes = {}
+
+    for field_name in fields:
+        location = field_locations.get(field_name, "NODE")
+        component_count = (
+            field_max_components.get(field_name, 0) or default_component_count
+        )
+
+        raw_labels = field_raw_labels.get(field_name)
+        if raw_labels and len(raw_labels) == component_count:
+            components = raw_labels
+        elif component_count == 1:
+            components = [field_name]
+        else:
+            components = [
+                "component_{}".format(i + 1) for i in range(component_count)
+            ]
+
+        field_meta[field_name] = {
+            "location": location,
+            "component_count": component_count,
+            "components": components,
+        }
+
+        if location == "NODE":
+            point_keys = [_node_key(node) for node in nodes]
+        else:
+            point_keys = sorted(field_point_sets[field_name], key=_sort_key)
+
+        point_keys_map[field_name] = point_keys
+        point_indexes[field_name] = {k: i for i, k in enumerate(point_keys)}
+
+    return filtered_frames, frequencies, field_meta, point_keys_map, point_indexes
+
+
 def _filter_frames_by_frequency(frames, frequency_min=None, frequency_max=None):
+    """Filter frames by frequency.  Kept for backward compatibility."""
     filtered_frames = []
     for frame in frames:
         frequency = float(frame.frameValue)
@@ -423,16 +556,15 @@ def _filter_frames_by_frequency(frames, frequency_min=None, frequency_max=None):
 
 def extract_field_arrays(step, nodes, fields, frequency_min=None, frequency_max=None):
     np = _numpy()
-    frames = _filter_frames_by_frequency(
-        list(step.frames),
-        frequency_min=frequency_min,
-        frequency_max=frequency_max,
+
+    frames, frequencies, field_meta, point_keys_map, point_indexes = (
+        _collect_field_metadata(step, fields, nodes, frequency_min, frequency_max)
     )
-    frequencies = np.asarray([float(frame.frameValue) for frame in frames], dtype=float)
+
     node_labels = np.asarray([node.label for node in nodes], dtype=np.int64)
     node_coordinates = np.asarray([node.coordinates for node in nodes], dtype=float)
-    default_component_count = _component_count_from_step(step, fields)
     warnings = []
+    memmap_files = []  # type: list
 
     arrays = {
         "frequencies": frequencies,
@@ -452,27 +584,26 @@ def extract_field_arrays(step, nodes, fields, frequency_min=None, frequency_max=
         },
         "field_outputs": {},
         "warnings": warnings,
+        "_memmap_files": memmap_files,
     }
 
     for field_name in fields:
-        location = _field_location_from_step(step, field_name)
-        point_keys = _collect_field_point_keys(step, field_name, nodes, location)
-        point_index = {}  # type: dict
-        for index, point_key in enumerate(point_keys):
-            point_index[point_key] = index
-        component_count = _component_count_for_field(step, field_name) or default_component_count
-        components = _component_labels_for_field(step, field_name, component_count)
+        meta = field_meta[field_name]
+        location = meta["location"]
+        point_keys = point_keys_map[field_name]
+        point_index = point_indexes[field_name]
+        component_count = meta["component_count"]
+        components = meta["components"]
         array_layout = _array_layout_for_location(location)
         real_key = "{}_real".format(field_name)
         imag_key = "{}_imag".format(field_name)
-        real_data = _full_array(
-            np,
-            (len(frames), len(point_keys), component_count), np.nan, dtype=float
-        )
-        imag_data = _full_array(
-            np,
-            (len(frames), len(point_keys), component_count), np.nan, dtype=float
-        )
+
+        field_shape = (len(frames), len(point_keys), component_count)
+        real_data, real_tmp = _create_memmap_array(np, field_shape)
+        imag_data, imag_tmp = _create_memmap_array(np, field_shape)
+        real_data.fill(np.nan)
+        imag_data.fill(np.nan)
+        memmap_files.extend([real_tmp, imag_tmp])
 
         for frame_index, frame in enumerate(frames):
             if field_name not in frame.fieldOutputs:
@@ -724,10 +855,15 @@ def run_list_node_sets(args):
 
 
 def run(args):
+    total_start = time.time()
+    stage_start = total_start
     odb = open_odb_readonly(args.odb)
+    stage_start = _log_elapsed("open ODB", stage_start)
+    memmap_files = []
     try:
         step_name = choose_step_name(odb, args.step)
         step = odb.steps[step_name]
+        stage_start = _log_elapsed("choose step", stage_start)
         node_labels = parse_node_label_values(args.node_labels)
         node_set_warnings = []
         nodes = collect_nodes(
@@ -737,6 +873,7 @@ def run(args):
             node_set_names=args.node_sets,
             warnings=node_set_warnings,
         )
+        stage_start = _log_elapsed("collect nodes", stage_start)
         arrays, extraction_metadata = extract_field_arrays(
             step,
             nodes,
@@ -744,6 +881,8 @@ def run(args):
             frequency_min=args.frequency_min,
             frequency_max=args.frequency_max,
         )
+        stage_start = _log_elapsed("extract field arrays", stage_start)
+        memmap_files = extraction_metadata.get("_memmap_files", [])
         filters = {
             "instances": list(args.instances or []),
             "node_labels": list(node_labels or []),
@@ -779,7 +918,9 @@ def run(args):
             command_options=command_options,
         )
         extraction_metadata["warnings"].extend(node_set_warnings)
+        stage_start = _log_elapsed("build metadata", stage_start)
         save_npz(args.output, arrays)
+        stage_start = _log_elapsed("save NPZ", stage_start)
         if csv_output:
             save_node_set_csv(
                 csv_output,
@@ -787,15 +928,19 @@ def run(args):
                 metadata,
                 csv_components=parse_csv_component_specs(args.csv_components),
             )
+            stage_start = _log_elapsed("save CSV", stage_start)
         save_metadata(args.metadata, metadata)
+        stage_start = _log_elapsed("save metadata", stage_start)
     finally:
         odb.close()
+        _cleanup_memmap_files(memmap_files)
     print("Saved NPZ: {}".format(args.output))
     if csv_output:
         print("Saved CSV: {}".format(csv_output))
     print("Saved metadata: {}".format(args.metadata))
     if metadata["warnings"]:
         print("Warnings: {}".format(len(metadata["warnings"])))
+    _log_elapsed("total", total_start)
     return metadata
 
 

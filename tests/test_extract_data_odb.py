@@ -1,4 +1,5 @@
 import csv
+import io
 import json
 import importlib
 import os
@@ -139,6 +140,15 @@ class ExtractorTests(unittest.TestCase):
 
         self.assertEqual(array.shape, (2, 2))
         self.assertTrue(np.isnan(array).all())
+
+    def test_log_elapsed_prints_timing_and_returns_current_time(self):
+        stream = io.StringIO()
+
+        with mock.patch("sys.stdout", stream):
+            current_time = extractor._log_elapsed("open ODB", 10.0, now=12.3456)
+
+        self.assertEqual(current_time, 12.3456)
+        self.assertEqual(stream.getvalue(), "[timing] open ODB: 2.346 s\n")
 
     def test_collect_nodes_returns_sorted_instance_node_pairs(self):
         nodes = extractor.collect_nodes(FakeOdb())
