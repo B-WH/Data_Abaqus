@@ -104,6 +104,11 @@ def parse_args(argv=None):
         action="store_true",
         help="Print available field output names as JSON and exit.",
     )
+    parser.add_argument(
+        "--inspect-odb",
+        action="store_true",
+        help="Print ODB structure summary as JSON and exit.",
+    )
     return parser.parse_args(argv)
 
 
@@ -299,6 +304,103 @@ def collect_field_names(step):
     for frame in step.frames:
         field_names.update(frame.fieldOutputs.keys())
     return sorted(field_names)
+
+
+def _mapping_keys(mapping):
+    if mapping is None:
+        return []
+    return sorted(mapping.keys())
+
+
+def _inspect_value_location(value):
+    if hasattr(value, "nodeLabel"):
+        return "NODE"
+    if hasattr(value, "elementLabel"):
+        if getattr(value, "integrationPoint", None) is not None:
+            return "INTEGRATION_POINT"
+        return "ELEMENT"
+    return "VALUE"
+
+
+def _inspect_field(step, field_name):
+    component_labels = None
+    location = "UNKNOWN"
+    component_count = 0
+
+    for frame in step.frames:
+        if field_name not in frame.fieldOutputs:
+            continue
+        field = frame.fieldOutputs[field_name]
+        labels = getattr(field, "componentLabels", None)
+        if labels and component_labels is None:
+            component_labels = [str(label) for label in labels]
+        values = _get_field_values(field)
+        if not len(values):
+            continue
+        value = values[0]
+        location = _inspect_value_location(value)
+        component_count = len(_value_data_tuple(value.data))
+        break
+
+    if component_labels is None:
+        if component_count == 1:
+            component_labels = [field_name]
+        elif component_count:
+            component_labels = [
+                "component_{}".format(index + 1)
+                for index in range(component_count)
+            ]
+        else:
+            component_labels = []
+
+    return {
+        "location": location,
+        "component_count": int(component_count or len(component_labels)),
+        "components": component_labels,
+    }
+
+
+def _inspect_step(step):
+    frame_values = [float(frame.frameValue) for frame in step.frames]
+    fields = {}
+    for field_name in collect_field_names(step):
+        fields[field_name] = _inspect_field(step, field_name)
+
+    history_regions = {}
+    for region_name in _mapping_keys(getattr(step, "historyRegions", {})):
+        region = step.historyRegions[region_name]
+        history_regions[region_name] = _mapping_keys(
+            getattr(region, "historyOutputs", {})
+        )
+
+    return {
+        "frame_count": len(step.frames),
+        "frame_value_range": [min(frame_values), max(frame_values)] if frame_values else [],
+        "fields": fields,
+        "history_regions": history_regions,
+    }
+
+
+def inspect_odb(odb, source_odb=None):
+    assembly = odb.rootAssembly
+    instances = {}
+    for instance_name in _mapping_keys(getattr(assembly, "instances", {})):
+        instance = assembly.instances[instance_name]
+        instances[instance_name] = {
+            "node_count": len(getattr(instance, "nodes", [])),
+            "element_count": len(getattr(instance, "elements", [])),
+        }
+
+    metadata = {
+        "source_odb": os.path.abspath(source_odb) if source_odb else None,
+        "instances": instances,
+        "node_sets": _mapping_keys(getattr(assembly, "nodeSets", {})),
+        "element_sets": _mapping_keys(getattr(assembly, "elementSets", {})),
+        "steps": {},
+    }
+    for step_name in _mapping_keys(getattr(odb, "steps", {})):
+        metadata["steps"][step_name] = _inspect_step(odb.steps[step_name])
+    return metadata
 
 
 def _tuple_to_float_array(value):
@@ -960,10 +1062,22 @@ def run_list_fields(args):
     return metadata
 
 
+def run_inspect_odb(args):
+    odb = open_odb_readonly(args.odb)
+    try:
+        metadata = inspect_odb(odb, source_odb=args.odb)
+    finally:
+        odb.close()
+    print(json.dumps(metadata, ensure_ascii=False, sort_keys=True))
+    return metadata
+
+
 def main(argv=None):
     args = parse_args(argv)
     try:
-        if args.list_fields:
+        if args.inspect_odb:
+            run_inspect_odb(args)
+        elif args.list_fields:
             run_list_fields(args)
         elif args.list_node_sets:
             run_list_node_sets(args)

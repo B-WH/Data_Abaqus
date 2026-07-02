@@ -21,8 +21,9 @@ class FakeNode(object):
 
 
 class FakeInstance(object):
-    def __init__(self, nodes):
+    def __init__(self, nodes, elements=None):
         self.nodes = nodes
+        self.elements = elements or []
 
 
 class FakeAssembly(object):
@@ -97,8 +98,9 @@ class FakeFrame(object):
 
 
 class FakeStep(object):
-    def __init__(self, frames):
+    def __init__(self, frames, history_regions=None):
         self.frames = frames
+        self.historyRegions = history_regions or {}
 
 
 class ExtractorTests(unittest.TestCase):
@@ -180,6 +182,75 @@ class ExtractorTests(unittest.TestCase):
         )
 
         self.assertEqual(extractor.collect_field_names(step), ["A", "U", "V"])
+
+    def test_inspect_odb_reports_structure_without_extracting_arrays(self):
+        class HistoryRegion(object):
+            def __init__(self):
+                self.historyOutputs = {"RF1": object(), "U1": object()}
+
+        class InspectAssembly(object):
+            def __init__(self):
+                self.instances = {
+                    "PART-1-1": FakeInstance(
+                        [FakeNode(1), FakeNode(2)],
+                        elements=[object(), object(), object()],
+                    )
+                }
+                self.nodeSets = {"PROBE_NODE": object()}
+                self.elementSets = {"SHAFT": object()}
+
+        class InspectOdb(object):
+            def __init__(self):
+                self.rootAssembly = InspectAssembly()
+                self.steps = {
+                    "Step-1": FakeStep(
+                        [
+                            FakeFrame(
+                                5.0,
+                                {
+                                    "U": FakeFieldOutput(
+                                        [FakeValue("PART-1-1", 1, (1.0, 2.0, 3.0))],
+                                        component_labels=("U1", "U2", "U3"),
+                                    ),
+                                    "S": FakeFieldOutput(
+                                        [
+                                            FakeElementValue(
+                                                "PART-1-1",
+                                                10,
+                                                (1.0,),
+                                                integration_point=1,
+                                            )
+                                        ]
+                                    ),
+                                },
+                            ),
+                            FakeFrame(10.0, {"U": FakeFieldOutput([])}),
+                        ],
+                        history_regions={"Node PART-1-1.1": HistoryRegion()},
+                    )
+                }
+
+        metadata = extractor.inspect_odb(InspectOdb())
+
+        self.assertEqual(metadata["instances"]["PART-1-1"]["node_count"], 2)
+        self.assertEqual(metadata["instances"]["PART-1-1"]["element_count"], 3)
+        self.assertEqual(metadata["node_sets"], ["PROBE_NODE"])
+        self.assertEqual(metadata["element_sets"], ["SHAFT"])
+        self.assertEqual(metadata["steps"]["Step-1"]["frame_count"], 2)
+        self.assertEqual(metadata["steps"]["Step-1"]["frame_value_range"], [5.0, 10.0])
+        self.assertEqual(metadata["steps"]["Step-1"]["fields"]["U"]["location"], "NODE")
+        self.assertEqual(
+            metadata["steps"]["Step-1"]["fields"]["U"]["components"],
+            ["U1", "U2", "U3"],
+        )
+        self.assertEqual(
+            metadata["steps"]["Step-1"]["fields"]["S"]["location"],
+            "INTEGRATION_POINT",
+        )
+        self.assertEqual(
+            metadata["steps"]["Step-1"]["history_regions"]["Node PART-1-1.1"],
+            ["RF1", "U1"],
+        )
 
     def test_extract_field_arrays_preserves_real_imaginary_and_marks_missing_values(self):
         nodes = [

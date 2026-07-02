@@ -45,6 +45,7 @@ UI_TEXT = {
     "frequency_min": "频率下限",
     "frequency_max": "频率上限",
     "refresh_fields": "读取场输出",
+    "inspect_odb": "检查 ODB 结构",
     "available_fields": "可用场输出",
     "csv_components": "CSV 分量",
     "csv_component_hint": "读取场输出后可选择 CSV 输出方向。",
@@ -61,9 +62,13 @@ UI_TEXT = {
     "select_odb_first": "请先选择 ODB 文件，再读取场输出。",
     "empty_abaqus": "Abaqus 命令为空，已跳过场输出读取。",
     "discovering_fields": "正在读取场输出。",
+    "inspecting_odb": "正在检查 ODB 结构。",
     "discovering_node_sets": "正在读取节点集。",
     "field_discovery_failed_log": "读取场输出失败：{error}",
     "field_discovery_failed_title": "读取场输出失败",
+    "inspect_odb_failed_log": "检查 ODB 结构失败：{error}",
+    "inspect_odb_failed_title": "检查 ODB 结构失败",
+    "inspect_odb_finished_log": "ODB 结构：\n{summary}",
     "missing_odb_title": "缺少 ODB 文件",
     "missing_odb_message": "请先选择 ODB 文件。",
     "missing_abaqus_title": "缺少 Abaqus 命令",
@@ -149,6 +154,11 @@ def parse_args(argv=None):
     parser.add_argument(
         "--abaqus-command",
         help="Abaqus command or .bat path. Defaults to ABAQUS_COMMAND, abaqus, or abq20xx.",
+    )
+    parser.add_argument(
+        "--inspect-odb",
+        action="store_true",
+        help="Print ODB structure summary as JSON and exit.",
     )
     return parser.parse_args(argv)
 
@@ -335,6 +345,17 @@ def build_field_list_command(abaqus_command, extractor_module, odb_path, step_na
     return command
 
 
+def build_inspect_odb_command(abaqus_command, extractor_module, odb_path):
+    extractor_module = extractor_module or default_extractor_module()
+    command = [
+        abaqus_command,
+        "python",
+    ]
+    command.extend(_abaqus_python_target_args(extractor_module))
+    command.extend(["--odb", odb_path, "--inspect-odb"])
+    return command
+
+
 def parse_field_list_output(output_text):
     return _parse_list_metadata_output(
         output_text,
@@ -344,7 +365,29 @@ def parse_field_list_output(output_text):
     )
 
 
+def parse_inspect_odb_output(output_text):
+    return _parse_metadata_output(
+        output_text,
+        "steps",
+        dict,
+        "ODB inspection JSON does not contain a steps object.",
+        "Could not find ODB inspection JSON in Abaqus output.",
+    )
+
+
 def _parse_list_metadata_output(output_text, list_key, malformed_message, missing_message):
+    return _parse_metadata_output(
+        output_text,
+        list_key,
+        list,
+        malformed_message,
+        missing_message,
+    )
+
+
+def _parse_metadata_output(
+    output_text, required_key, required_type, malformed_message, missing_message
+):
     decoder = json.JSONDecoder()
     start = output_text.find("{")
     while start >= 0:
@@ -353,8 +396,8 @@ def _parse_list_metadata_output(output_text, list_key, malformed_message, missin
         except ValueError:
             start = output_text.find("{", start + 1)
             continue
-        if isinstance(metadata, dict) and list_key in metadata:
-            if not isinstance(metadata.get(list_key), list):
+        if isinstance(metadata, dict) and required_key in metadata:
+            if not isinstance(metadata.get(required_key), required_type):
                 raise ValueError(malformed_message)
             return metadata
         start = output_text.find("{", start + 1)
@@ -453,6 +496,21 @@ def discover_fields(
     return parse_field_list_output(output)
 
 
+def inspect_odb_structure(abaqus_command, extractor_module, odb_path, runner=None):
+    runner = run_command_capture if runner is None else runner
+    command = build_inspect_odb_command(
+        abaqus_command=abaqus_command,
+        extractor_module=extractor_module,
+        odb_path=odb_path,
+    )
+    code, output = runner(command)
+    if code != 0:
+        raise RuntimeError(
+            "ODB inspection failed with exit code {}.\n{}".format(code, output)
+        )
+    return parse_inspect_odb_output(output)
+
+
 def run_extraction(
     abaqus_command,
     odb_path,
@@ -542,7 +600,10 @@ def run_workflow(
         default_npz, default_metadata = default_output_paths(odb_path)
         output_path = output_path or default_npz
         metadata_path = metadata_path or default_metadata
-        csv_output_path = csv_output_path or default_csv_output_path(output_path)
+        if csv_components == {}:
+            csv_output_path = None
+        else:
+            csv_output_path = csv_output_path or default_csv_output_path(output_path)
 
     if log_callback:
         log_callback(UI_TEXT["starting_extraction"])
@@ -606,6 +667,15 @@ def run_cli(argv=None):
         )
         return 2
     csv_components = parse_csv_component_specs(args.csv_components)
+
+    if args.inspect_odb:
+        metadata = inspect_odb_structure(
+            abaqus_command=abaqus_command,
+            extractor_module=default_extractor_module(),
+            odb_path=odb_path,
+        )
+        print(json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
 
     return run_workflow(
         abaqus_command=abaqus_command,
@@ -830,6 +900,12 @@ class ExtractOdbApp(object):
         button_bar.grid(row=18, column=0, columnspan=3, sticky="ew", pady=(8, 6))
         self.run_button = ttk.Button(button_bar, text=UI_TEXT["run_button"], command=self.run)
         self.run_button.pack(side="left")
+        self.inspect_button = ttk.Button(
+            button_bar,
+            text=UI_TEXT["inspect_odb"],
+            command=self.inspect_odb,
+        )
+        self.inspect_button.pack(side="left", padx=(8, 0))
         ttk.Label(button_bar, textvariable=self.status_var).pack(side="left", padx=12)
 
         self.log_text = tk.Text(frame, height=12, wrap="word")
@@ -1033,6 +1109,7 @@ class ExtractOdbApp(object):
     def _set_running(self, running):
         self._running = running
         self.run_button.configure(state="disabled" if running else "normal")
+        self.inspect_button.configure(state="disabled" if running else "normal")
         self.refresh_button.configure(state="disabled" if running else "normal")
         for button in self.field_selection_buttons:
             button.configure(state="disabled" if running else "normal")
@@ -1249,6 +1326,54 @@ class ExtractOdbApp(object):
 
         self.root.after(0, finish)
 
+    def inspect_odb(self):
+        if self._running:
+            return
+        odb_path = self.odb_var.get().strip()
+        if not odb_path:
+            self.log(UI_TEXT["select_odb_first"])
+            return
+        abaqus_command = self.abaqus_var.get().strip()
+        if not abaqus_command:
+            self.log(UI_TEXT["empty_abaqus"])
+            return
+        self.log(UI_TEXT["inspecting_odb"])
+        self._set_running(True)
+        worker = threading.Thread(
+            target=self._inspect_odb_worker,
+            args=(abaqus_command, default_extractor_module(), odb_path),
+        )
+        worker.daemon = True
+        worker.start()
+
+    def _inspect_odb_worker(self, abaqus_command, extractor_module, odb_path):
+        from tkinter import messagebox
+
+        try:
+            metadata = inspect_odb_structure(
+                abaqus_command=abaqus_command,
+                extractor_module=extractor_module,
+                odb_path=odb_path,
+            )
+        except Exception as exc:
+            error_message = str(exc)
+
+            def fail():
+                self._set_running(False)
+                self.log(UI_TEXT["inspect_odb_failed_log"].format(error=error_message))
+                messagebox.showerror(UI_TEXT["inspect_odb_failed_title"], error_message)
+
+            self.root.after(0, fail)
+            return
+
+        summary = json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True)
+
+        def finish():
+            self._set_running(False)
+            self.log(UI_TEXT["inspect_odb_finished_log"].format(summary=summary))
+
+        self.root.after(0, finish)
+
     def refresh_node_sets(self):
         """Trigger node set discovery in background thread."""
         if self._running:
@@ -1325,7 +1450,7 @@ class ExtractOdbApp(object):
             ]
             if selected:
                 selections[field_name] = selected
-        return selections or None
+        return selections
 
     def _validate_inputs(self):
         from tkinter import messagebox

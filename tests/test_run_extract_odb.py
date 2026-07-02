@@ -22,6 +22,12 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("yscrollcommand", build_source)
         self.assertIn("scrollregion", update_source)
 
+    def test_build_widgets_has_inspect_odb_button(self):
+        build_source = inspect.getsource(launcher.ExtractOdbApp._build_widgets)
+
+        self.assertIn('UI_TEXT["inspect_odb"]', build_source)
+        self.assertIn("command=self.inspect_odb", build_source)
+
     def test_build_extraction_command_includes_abaqus_python_module_and_options(self):
         command = launcher.build_extraction_command(
             abaqus_command="abq2024",
@@ -113,6 +119,26 @@ class LauncherTests(unittest.TestCase):
             ],
         )
 
+    def test_build_inspect_odb_command_includes_inspect_flag(self):
+        command = launcher.build_inspect_odb_command(
+            abaqus_command="abaqus",
+            extractor_module="odb_extract.extractor",
+            odb_path="data/test1.odb",
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "abaqus",
+                "python",
+                "-m",
+                "odb_extract.extractor",
+                "--odb",
+                "data/test1.odb",
+                "--inspect-odb",
+            ],
+        )
+
     def test_default_field_list_command_uses_script_path_for_other_workdirs(self):
         command = launcher.build_field_list_command(
             abaqus_command="abaqus",
@@ -176,6 +202,36 @@ class LauncherTests(unittest.TestCase):
             [["abaqus", "python", "-m", "odb_extract.extractor", "--odb", "data/test1.odb"]],
         )
 
+    def test_inspect_odb_structure_calls_runner_and_returns_metadata(self):
+        calls = []
+
+        def fake_runner(command):
+            calls.append(command)
+            return 0, '{"steps": {"Step-1": {"frame_count": 2}}}'
+
+        metadata = launcher.inspect_odb_structure(
+            abaqus_command="abaqus",
+            extractor_module="odb_extract.extractor",
+            odb_path="data/test1.odb",
+            runner=fake_runner,
+        )
+
+        self.assertEqual(metadata["steps"]["Step-1"]["frame_count"], 2)
+        self.assertEqual(
+            calls,
+            [
+                [
+                    "abaqus",
+                    "python",
+                    "-m",
+                    "odb_extract.extractor",
+                    "--odb",
+                    "data/test1.odb",
+                    "--inspect-odb",
+                ]
+            ],
+        )
+
     def test_default_extractor_module_points_to_script_path(self):
         path = launcher.default_extractor_module()
 
@@ -230,6 +286,13 @@ class LauncherTests(unittest.TestCase):
         )
 
         self.assertEqual(metadata["fields"], ["U"])
+
+    def test_parse_inspect_odb_output_reads_embedded_json(self):
+        metadata = launcher.parse_inspect_odb_output(
+            'Abaqus startup text {"source_odb": "x.odb", "steps": {"Step-1": {"frame_count": 2}}}\n'
+        )
+
+        self.assertEqual(metadata["steps"]["Step-1"]["frame_count"], 2)
 
     def test_parse_node_set_list_output_reads_embedded_json(self):
         metadata = launcher.parse_node_set_list_output(
@@ -287,6 +350,11 @@ class LauncherTests(unittest.TestCase):
         )
 
         self.assertEqual(args.csv_components, ["V=1,3,total", "U=2"])
+
+    def test_parse_args_accepts_inspect_odb(self):
+        args = launcher.parse_args(["--odb", "data/test1.odb", "--inspect-odb"])
+
+        self.assertTrue(args.inspect_odb)
 
     def test_ui_text_is_chinese(self):
         self.assertEqual(launcher.UI_TEXT["window_title"], "Abaqus ODB 数据提取工具")
@@ -492,6 +560,28 @@ class LauncherTests(unittest.TestCase):
             calls[0]["csv_output_path"],
             launcher.default_csv_output_path(default_npz),
         )
+
+    def test_run_workflow_skips_node_set_csv_when_components_empty(self):
+        calls = []
+
+        def fake_extraction(**kwargs):
+            calls.append(kwargs)
+            return 0
+
+        code = launcher.run_workflow(
+            abaqus_command="abaqus",
+            extractor_module="odb_extract.extractor",
+            odb_path=r"D:\work\data\test1.odb",
+            output_path=None,
+            metadata_path=None,
+            node_sets=["NSET_TOP"],
+            csv_components={},
+            extraction_runner=fake_extraction,
+            verbose=False,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertIsNone(calls[0]["csv_output_path"])
 
     def test_validate_inputs_includes_point_export_options(self):
         app = object.__new__(launcher.ExtractOdbApp)
@@ -754,6 +844,38 @@ class LauncherTests(unittest.TestCase):
 
         self.assertEqual(options["fields"], ["V"])
         self.assertEqual(options["csv_components"], {"V": ["1", "3", "total"]})
+
+    def test_validate_inputs_preserves_empty_csv_component_selection(self):
+        app = object.__new__(launcher.ExtractOdbApp)
+        app.odb_var = self.FakeVar("data/test1.odb")
+        app.output_var = self.FakeVar("output/data.npz")
+        app.metadata_var = self.FakeVar("output/meta.json")
+        app.step_var = self.FakeVar("Step-1")
+        app.fields_var = self.FakeVar("V")
+        app.instances_var = self.FakeVar("")
+        app.node_labels_var = self.FakeVar("")
+        app.node_sets_var = self.FakeVar("NSET_TOP")
+        app.frequency_min_var = self.FakeVar("")
+        app.frequency_max_var = self.FakeVar("")
+        app.points_var = self.FakeVar("")
+        app.point_output_var = self.FakeVar("")
+        app.point_fields_var = self.FakeVar("")
+        app.neighbors_var = self.FakeVar("4")
+        app.exact_tol_var = self.FakeVar("")
+        app.abaqus_var = self.FakeVar("abaqus")
+        app.field_vars = {"V": self.FakeVar(True)}
+        app.csv_component_vars = {
+            "V": {
+                "1": self.FakeVar(False),
+                "2": self.FakeVar(False),
+                "3": self.FakeVar(False),
+                "total": self.FakeVar(False),
+            }
+        }
+
+        options = app._validate_inputs()
+
+        self.assertEqual(options["csv_components"], {})
 
 
 if __name__ == "__main__":
