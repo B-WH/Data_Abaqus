@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 from mesh_convert import cli
+from mesh_convert import __main__ as mesh_main
 from mesh_convert.config import DimMode, ElementTarget, MeshConfig, resolve_element_type
 from mesh_convert.errors import MeshConversionError, UnsupportedFormatError
 from mesh_convert.geometry_import import detect_input_format
@@ -100,6 +101,174 @@ class ConfigTests(unittest.TestCase):
             code = cli.main([])
 
         self.assertEqual(code, 0)
+
+
+class MeshConvertLauncherTests(unittest.TestCase):
+    def test_main_without_arguments_runs_gui(self):
+        calls = []
+
+        def fake_gui():
+            calls.append("gui")
+            return 0
+
+        code = mesh_main.main([], gui_runner=fake_gui)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, ["gui"])
+
+    def test_main_with_arguments_runs_cli(self):
+        calls = []
+
+        def fake_cli(argv):
+            calls.append(list(argv))
+            return 0
+
+        code = mesh_main.main(["input.step", "out.inp"], cli_runner=fake_cli)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [["input.step", "out.inp"]])
+
+
+class MeshConvertGuiTests(unittest.TestCase):
+    class FakeVar:
+        def __init__(self, value):
+            self.value = value
+
+        def get(self):
+            return self.value
+
+    def test_build_cli_args_from_gui_inputs(self):
+        from mesh_convert.gui import MeshConvertApp
+
+        app = object.__new__(MeshConvertApp)
+        app.input_var = self.FakeVar("model.step")
+        app.output_var = self.FakeVar("mesh.inp")
+        app.size_var = self.FakeVar("2.5")
+        app.dim_var = self.FakeVar("3d")
+        app.target_var = self.FakeVar("hex")
+        app.element_type_var = self.FakeVar("C3D8R")
+        app.allow_degrade_var = self.FakeVar(True)
+        app.log_var = self.FakeVar("mesh.log")
+        app.report_var = self.FakeVar("mesh_report.json")
+
+        args = app._build_cli_args()
+
+        self.assertEqual(
+            args,
+            [
+                "model.step",
+                "mesh.inp",
+                "--size",
+                "2.5",
+                "--dim",
+                "3d",
+                "--target",
+                "hex",
+                "--element-type",
+                "C3D8R",
+                "--allow-degrade",
+                "--log",
+                "mesh.log",
+                "--report",
+                "mesh_report.json",
+            ],
+        )
+
+    def test_format_report_summary_shows_mesh_result_details(self):
+        from mesh_convert.gui import format_report_summary
+
+        summary = format_report_summary(
+            {
+                "status": "ok",
+                "node_count": 12,
+                "element_counts": {"C3D4": 2, "C3D8R": 4},
+                "degraded": True,
+                "warnings": ["3D hex target produced non-hex element types: C3D4."],
+            }
+        )
+
+        self.assertIn("是否成功：是", summary)
+        self.assertIn("节点数：12", summary)
+        self.assertIn("单元数：6", summary)
+        self.assertIn("单元类型统计：C3D4=2, C3D8R=4", summary)
+        self.assertIn("是否发生 mixed 降级：是", summary)
+        self.assertIn("警告信息：", summary)
+        self.assertIn("3D hex target produced non-hex", summary)
+
+    def test_build_cli_args_accepts_chinese_combo_values(self):
+        from mesh_convert.gui import MeshConvertApp
+
+        app = object.__new__(MeshConvertApp)
+        app.input_var = self.FakeVar("model.step")
+        app.output_var = self.FakeVar("mesh.inp")
+        app.size_var = self.FakeVar("2.5")
+        app.dim_var = self.FakeVar("三维")
+        app.target_var = self.FakeVar("六面体")
+        app.element_type_var = self.FakeVar("")
+        app.allow_degrade_var = self.FakeVar(False)
+        app.log_var = self.FakeVar("")
+        app.report_var = self.FakeVar("")
+
+        args = app._build_cli_args()
+
+        self.assertIn("3d", args)
+        self.assertIn("hex", args)
+
+    def test_recommend_output_paths_from_input_file(self):
+        from mesh_convert.gui import recommend_paths_from_input
+
+        paths = recommend_paths_from_input("model.step")
+
+        self.assertEqual(paths.output_path, "model.inp")
+        self.assertEqual(paths.log_path, "model.log")
+        self.assertEqual(paths.report_path, "model_report.json")
+
+    def test_recommend_auxiliary_paths_from_output_file(self):
+        from mesh_convert.gui import recommend_auxiliary_paths
+
+        paths = recommend_auxiliary_paths("mesh_output.inp")
+
+        self.assertEqual(paths.log_path, "mesh_output.log")
+        self.assertEqual(paths.report_path, "mesh_output_report.json")
+
+    def test_friendly_failure_message_explains_missing_gmsh(self):
+        from mesh_convert.gui import format_friendly_failure
+
+        message = format_friendly_failure(
+            "mesh_convert: error: The gmsh Python package is required. "
+            "Install it with: pip install gmsh"
+        )
+
+        self.assertIn("缺少 gmsh Python 包", message)
+        self.assertIn("pip install gmsh", message)
+
+    def test_friendly_failure_message_explains_mixed_fallback(self):
+        from mesh_convert.gui import format_friendly_failure
+
+        message = format_friendly_failure(
+            "3D hex target produced non-hex element types: C3D4. "
+            "Use --allow-degrade to write an explained mixed mesh."
+        )
+
+        self.assertIn("允许混合单元降级", message)
+        self.assertIn("mixed 网格", message)
+
+
+class MeshConvertPackagingTests(unittest.TestCase):
+    def test_packaging_script_and_entrypoint_are_present(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script_path = os.path.join(root, "packaging", "build_mesh_convert_exe.ps1")
+        entry_path = os.path.join(root, "packaging", "mesh_convert_gui_entry.py")
+
+        self.assertTrue(os.path.isfile(script_path))
+        self.assertTrue(os.path.isfile(entry_path))
+        with open(script_path, "r", encoding="utf-8") as handle:
+            script_text = handle.read()
+
+        self.assertIn("PyInstaller", script_text)
+        self.assertIn("mesh_convert_gui_entry.py", script_text)
+        self.assertNotIn("Remove-Item -Recurse", script_text)
+        self.assertNotIn("rm -rf", script_text)
 
 
 class InpWriterTests(unittest.TestCase):
