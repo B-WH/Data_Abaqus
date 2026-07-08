@@ -3,7 +3,7 @@ import inspect
 import unittest
 from unittest import mock
 
-from odb_extract import launcher
+from odb_extract import launcher, merge_gui
 
 
 class LauncherTests(unittest.TestCase):
@@ -27,6 +27,18 @@ class LauncherTests(unittest.TestCase):
 
         self.assertIn('UI_TEXT["inspect_odb"]', build_source)
         self.assertIn("command=self.inspect_odb", build_source)
+
+    def test_build_widgets_has_merge_results_button(self):
+        build_source = inspect.getsource(launcher.ExtractOdbApp._build_widgets)
+
+        self.assertIn('UI_TEXT["merge_results"]', build_source)
+        self.assertIn("command=self.open_merge_window", build_source)
+
+    def test_node_set_worker_schedules_ui_update(self):
+        worker_source = inspect.getsource(launcher.ExtractOdbApp._discover_node_sets_worker)
+
+        self.assertIn("self._show_discovered_node_sets(metadata)", worker_source)
+        self.assertIn("self.root.after(0, finish)", worker_source)
 
     def test_build_extraction_command_includes_abaqus_python_module_and_options(self):
         command = launcher.build_extraction_command(
@@ -876,6 +888,88 @@ class LauncherTests(unittest.TestCase):
         options = app._validate_inputs()
 
         self.assertEqual(options["csv_components"], {})
+
+    def test_run_merge_point_data_calls_runner(self):
+        calls = []
+
+        def runner(**kwargs):
+            calls.append(kwargs)
+            return {"frequencies": [1.0, 2.0]}, {
+                "merge": {"frequency_min": 1.0, "frequency_max": 2.0}
+            }
+
+        logs = []
+        result = merge_gui.run_merge_point_data(
+            data_paths=["a_point_data.npz", "b_point_data.npz"],
+            output_path="merged_point_data.npz",
+            metadata_output_path="merged_point_metadata.json",
+            duplicate_frequency_tolerance=1.0e-7,
+            merge_runner=runner,
+            log_callback=logs.append,
+        )
+
+        self.assertEqual(result["frequency_count"], 2)
+        self.assertEqual(calls[0]["data_paths"], ["a_point_data.npz", "b_point_data.npz"])
+        self.assertEqual(calls[0]["output_path"], "merged_point_data.npz")
+        self.assertEqual(calls[0]["metadata_output_path"], "merged_point_metadata.json")
+        self.assertEqual(calls[0]["duplicate_frequency_tolerance"], 1.0e-7)
+        self.assertTrue(any("merged_point_data.npz" in message for message in logs))
+
+    def test_merge_window_validate_inputs_requires_two_npz_files(self):
+        window = object.__new__(merge_gui.MergePointDataWindow)
+        window.data_paths = ["a_point_data.npz"]
+        window.output_var = self.FakeVar("merged_point_data.npz")
+        window.metadata_var = self.FakeVar("merged_point_metadata.json")
+        window.duplicate_tol_var = self.FakeVar("1e-8")
+
+        with mock.patch("tkinter.messagebox.showerror") as showerror:
+            self.assertIsNone(window._validate_inputs())
+
+        self.assertTrue(showerror.called)
+
+    def test_merge_window_validate_inputs_requires_output_paths(self):
+        window = object.__new__(merge_gui.MergePointDataWindow)
+        window.data_paths = ["a_point_data.npz", "b_point_data.npz"]
+        window.output_var = self.FakeVar("")
+        window.metadata_var = self.FakeVar("merged_point_metadata.json")
+        window.duplicate_tol_var = self.FakeVar("1e-8")
+
+        with mock.patch("tkinter.messagebox.showerror") as showerror:
+            self.assertIsNone(window._validate_inputs())
+
+        self.assertTrue(showerror.called)
+
+    def test_merge_window_validate_inputs_requires_paired_metadata(self):
+        window = object.__new__(merge_gui.MergePointDataWindow)
+        window.data_paths = [
+            r"D:\work\a_point_data.npz",
+            r"D:\work\b_point_data.npz",
+        ]
+        window.output_var = self.FakeVar("merged_point_data.npz")
+        window.metadata_var = self.FakeVar("merged_point_metadata.json")
+        window.duplicate_tol_var = self.FakeVar("1e-8")
+
+        def exists(path):
+            return not path.endswith("b_point_metadata.json")
+
+        with mock.patch("os.path.exists", side_effect=exists):
+            with mock.patch("tkinter.messagebox.showerror") as showerror:
+                self.assertIsNone(window._validate_inputs())
+
+        self.assertTrue(showerror.called)
+
+    def test_merge_window_validate_inputs_rejects_invalid_tolerance(self):
+        window = object.__new__(merge_gui.MergePointDataWindow)
+        window.data_paths = ["a_point_data.npz", "b_point_data.npz"]
+        window.output_var = self.FakeVar("merged_point_data.npz")
+        window.metadata_var = self.FakeVar("merged_point_metadata.json")
+        window.duplicate_tol_var = self.FakeVar("not-a-number")
+
+        with mock.patch("os.path.exists", return_value=True):
+            with mock.patch("tkinter.messagebox.showerror") as showerror:
+                self.assertIsNone(window._validate_inputs())
+
+        self.assertTrue(showerror.called)
 
 
 if __name__ == "__main__":

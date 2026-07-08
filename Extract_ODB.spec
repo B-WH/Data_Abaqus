@@ -6,7 +6,12 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('odb_extract/extractor.py', 'odb_extract')],
-    hiddenimports=['odb_extract.extractor', 'odb_extract.interpolate_points'],
+    hiddenimports=[
+        'odb_extract.extractor',
+        'odb_extract.interpolate_points',
+        'odb_extract.merge_gui',
+        'odb_extract.merge_point_data',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

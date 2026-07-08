@@ -23,7 +23,7 @@ DEFAULT_OUTPUT = os.path.join("output", "test1_point_data.npz")
 DEFAULT_METADATA = os.path.join("output", "test1_point_metadata.json")
 DEFAULT_FIELDS = ("U", "UR", "V", "VR", "A", "AR")
 TOOL_NAME = "odb_extract.extractor"
-METADATA_SCHEMA_VERSION = 1
+METADATA_SCHEMA_VERSION = 2
 CSV_COMPONENT_KEYS = ("1", "2", "3", "total")
 
 NodeRef = namedtuple("NodeRef", ["instance_name", "label", "coordinates"])
@@ -926,11 +926,6 @@ def build_metadata(
             }
             for node in nodes
         ],
-        "node_labels": [int(label) for label in arrays["node_labels"].tolist()],
-        "node_coordinates": [
-            [float(value) for value in row] for row in arrays["node_coordinates"].tolist()
-        ],
-        "frequencies": [float(value) for value in arrays["frequencies"].tolist()],
         "array_shapes": extraction_metadata["array_shapes"],
         "array_layouts": extraction_metadata.get("array_layouts", {}),
         "field_outputs": extraction_metadata.get("field_outputs", {}),

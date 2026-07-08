@@ -24,6 +24,8 @@ env/
 
 # Extracted outputs
 output/
+work/test-output/
+work/tmp/
 
 # Editor and OS files
 .vscode/

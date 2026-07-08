@@ -198,6 +198,38 @@ class InterpolateOdbPointsTests(unittest.TestCase):
         self.assertAlmostEqual(float(rows[0]["real"]), expected_real)
         self.assertAlmostEqual(float(rows[0]["imag"]), expected_imag)
 
+    def test_neighbor_search_uses_partial_selection_for_requested_count(self):
+        original_argpartition = interp.np.argpartition
+        calls = []
+
+        def recording_argpartition(values, kth):
+            calls.append(kth)
+            return original_argpartition(values, kth)
+
+        interp.np.argpartition = recording_argpartition
+        try:
+            indices, _weights, distances, method = interp._neighbor_weights(
+                np.array(
+                    [
+                        [0.0, 0.0, 0.0],
+                        [5.0, 0.0, 0.0],
+                        [2.0, 0.0, 0.0],
+                        [1.0, 0.0, 0.0],
+                    ],
+                    dtype=float,
+                ),
+                np.array([0.1, 0.0, 0.0], dtype=float),
+                neighbors=2,
+                exact_tol=1.0e-12,
+            )
+        finally:
+            interp.np.argpartition = original_argpartition
+
+        self.assertEqual(calls, [1])
+        self.assertEqual(indices.tolist(), [0, 3])
+        self.assertEqual(method, "weighted")
+        self.assertLessEqual(distances[0], distances[1])
+
     def test_fields_option_limits_output_fields(self):
         self._write_points([{"point_id": "p1", "x": "0.0", "y": "0.0", "z": "0.0"}])
 
@@ -243,7 +275,7 @@ class InterpolateOdbPointsTests(unittest.TestCase):
     def test_default_fields_skip_non_node_outputs(self):
         self._write_points([{"point_id": "p1", "x": "0.0", "y": "0.0", "z": "0.0"}])
 
-        rows = interp.interpolate_files(
+        row_count = interp.interpolate_files(
             data_path=self.data_path,
             metadata_path=self.metadata_path,
             points_path=self.points_path,
@@ -251,9 +283,34 @@ class InterpolateOdbPointsTests(unittest.TestCase):
             fields=None,
         )
 
+        rows = self._read_output()
+        self.assertEqual(row_count, 2)
         self.assertEqual([row["field"] for row in rows], ["U", "V"])
         self.assertEqual(float(rows[0]["real"]), 10.0)
         self.assertEqual(float(rows[1]["real"]), 100.0)
+
+    def test_interpolate_files_closes_loaded_npz(self):
+        self._write_points([{"point_id": "p1", "x": "0.0", "y": "0.0", "z": "0.0"}])
+        loaded = np.load(self.data_path)
+        original_load = interp.np.load
+
+        def fake_load(_path):
+            return loaded
+
+        interp.np.load = fake_load
+        try:
+            row_count = interp.interpolate_files(
+                data_path=self.data_path,
+                metadata_path=self.metadata_path,
+                points_path=self.points_path,
+                output_path=self.output_path,
+                fields=["U"],
+            )
+        finally:
+            interp.np.load = original_load
+
+        self.assertEqual(row_count, 1)
+        self.assertIsNone(loaded.zip)
 
     def test_element_field_is_rejected(self):
         self._write_points([{"point_id": "p1", "x": "0.0", "y": "0.0", "z": "0.0"}])

@@ -687,7 +687,7 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertIn("Field S is not a node field; skipped CSV export.", metadata["warnings"])
 
-    def test_build_metadata_records_node_coordinates(self):
+    def test_build_metadata_records_node_coordinates_once(self):
         nodes = [
             extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0)),
             extractor.NodeRef("PART-1-1", 2, (1.0, 2.0, 3.0)),
@@ -723,6 +723,9 @@ class ExtractorTests(unittest.TestCase):
 
         self.assertEqual(metadata["nodes"][0]["coordinates"], [0.0, 0.0, 0.0])
         self.assertEqual(metadata["nodes"][1]["coordinates"], [1.0, 2.0, 3.0])
+        self.assertNotIn("node_labels", metadata)
+        self.assertNotIn("node_coordinates", metadata)
+        self.assertNotIn("frequencies", metadata)
         self.assertEqual(metadata["array_layouts"]["node_coordinates"], ["node", "coordinate"])
 
     def test_build_metadata_records_tool_and_command_provenance(self):
@@ -762,7 +765,7 @@ class ExtractorTests(unittest.TestCase):
         )
 
         self.assertEqual(metadata["tool"]["name"], "odb_extract.extractor")
-        self.assertEqual(metadata["tool"]["metadata_schema_version"], 1)
+        self.assertEqual(metadata["tool"]["metadata_schema_version"], 2)
         self.assertEqual(metadata["command_options"]["fields"], ["U"])
         self.assertEqual(metadata["command_options"]["frequency_min"], 5.0)
         self.assertEqual(metadata["command_options"]["frequency_max"], 50.0)

@@ -46,6 +46,7 @@ UI_TEXT = {
     "frequency_max": "频率上限",
     "refresh_fields": "读取场输出",
     "inspect_odb": "检查 ODB 结构",
+    "merge_results": "合并结果",
     "available_fields": "可用场输出",
     "csv_components": "CSV 分量",
     "csv_component_hint": "读取场输出后可选择 CSV 输出方向。",
@@ -906,6 +907,12 @@ class ExtractOdbApp(object):
             command=self.inspect_odb,
         )
         self.inspect_button.pack(side="left", padx=(8, 0))
+        self.merge_button = ttk.Button(
+            button_bar,
+            text=UI_TEXT["merge_results"],
+            command=self.open_merge_window,
+        )
+        self.merge_button.pack(side="left", padx=(8, 0))
         ttk.Label(button_bar, textvariable=self.status_var).pack(side="left", padx=12)
 
         self.log_text = tk.Text(frame, height=12, wrap="word")
@@ -1110,6 +1117,7 @@ class ExtractOdbApp(object):
         self._running = running
         self.run_button.configure(state="disabled" if running else "normal")
         self.inspect_button.configure(state="disabled" if running else "normal")
+        self.merge_button.configure(state="disabled" if running else "normal")
         self.refresh_button.configure(state="disabled" if running else "normal")
         for button in self.field_selection_buttons:
             button.configure(state="disabled" if running else "normal")
@@ -1424,6 +1432,11 @@ class ExtractOdbApp(object):
             self._show_discovered_node_sets(metadata)
 
         self.root.after(0, finish)
+
+    def open_merge_window(self):
+        from odb_extract import merge_gui
+
+        merge_gui.MergePointDataWindow(self.root)
 
     def _selected_fields(self):
         if self.field_vars:

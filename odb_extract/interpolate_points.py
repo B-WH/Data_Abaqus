@@ -172,8 +172,7 @@ def _neighbor_weights(node_coordinates, query_coordinates, neighbors, exact_tol)
     if neighbors < 1:
         raise ValueError("--neighbors must be at least 1.")
     distances = np.linalg.norm(node_coordinates - query_coordinates, axis=1)
-    nearest_order = np.argsort(distances)
-    nearest_index = int(nearest_order[0])
+    nearest_index = int(np.argmin(distances))
     if float(distances[nearest_index]) <= exact_tol:
         return (
             np.asarray([nearest_index], dtype=np.int64),
@@ -182,8 +181,12 @@ def _neighbor_weights(node_coordinates, query_coordinates, neighbors, exact_tol)
             "exact",
         )
 
-    count = min(int(neighbors), len(nearest_order))
-    indices = nearest_order[:count].astype(np.int64)
+    count = min(int(neighbors), len(distances))
+    if count == len(distances):
+        indices = np.argsort(distances).astype(np.int64)
+    else:
+        partial = np.argpartition(distances, count - 1)[:count]
+        indices = partial[np.argsort(distances[partial])].astype(np.int64)
     selected_distances = distances[indices].astype(float)
     inverse_distances = 1.0 / selected_distances
     weights = inverse_distances / np.sum(inverse_distances)
@@ -196,33 +199,30 @@ def _weighted_values(values, indices, weights):
 
 def _write_rows(output_path, rows):
     ensure_parent_dir(output_path)
+    count = 0
     with open(output_path, "w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=OUTPUT_COLUMNS)
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+            count += 1
+    return count
 
 
-def interpolate_files(
-    data_path,
-    metadata_path,
-    points_path,
-    output_path,
-    fields=None,
-    csv_components=None,
-    neighbors=4,
-    exact_tol=1.0e-9,
+def _iter_interpolated_rows(
+    data,
+    metadata,
+    query_points,
+    requested_fields,
+    csv_components,
+    neighbors,
+    exact_tol,
 ):
-    metadata = load_metadata(metadata_path)
-    data = np.load(data_path)
-    requested_fields = list(fields if fields is not None else _available_node_fields(metadata))
     field_metadata_by_name = {
         field_name: _validate_field(metadata, field_name) for field_name in requested_fields
     }
     coordinate_lookup = _node_coordinate_lookup(data, metadata)
-    query_points = read_query_points(points_path)
     frequencies = np.asarray(data["frequencies"], dtype=float)
-    rows = []
 
     for field_name in requested_fields:
         field_metadata = field_metadata_by_name[field_name]
@@ -258,26 +258,49 @@ def interpolate_files(
                     else:
                         real = real_values[frame_index, component_index]
                         imag = imag_values[frame_index, component_index]
-                    rows.append(
-                        {
-                            "point_id": point["point_id"],
-                            "x": _float_text(point["coordinates"][0]),
-                            "y": _float_text(point["coordinates"][1]),
-                            "z": _float_text(point["coordinates"][2]),
-                            "frequency": _float_text(frequency),
-                            "field": field_name,
-                            "component": str(component),
-                            "real": _float_text(real),
-                            "imag": _float_text(imag),
-                            "method": method,
-                            "neighbor_labels": ";".join(str(int(label)) for label in neighbor_labels),
-                            "neighbor_weights": _joined_float_text(weights),
-                            "neighbor_distances": _joined_float_text(distances),
-                        }
-                    )
+                    yield {
+                        "point_id": point["point_id"],
+                        "x": _float_text(point["coordinates"][0]),
+                        "y": _float_text(point["coordinates"][1]),
+                        "z": _float_text(point["coordinates"][2]),
+                        "frequency": _float_text(frequency),
+                        "field": field_name,
+                        "component": str(component),
+                        "real": _float_text(real),
+                        "imag": _float_text(imag),
+                        "method": method,
+                        "neighbor_labels": ";".join(str(int(label)) for label in neighbor_labels),
+                        "neighbor_weights": _joined_float_text(weights),
+                        "neighbor_distances": _joined_float_text(distances),
+                    }
 
-    _write_rows(output_path, rows)
-    return rows
+
+def interpolate_files(
+    data_path,
+    metadata_path,
+    points_path,
+    output_path,
+    fields=None,
+    csv_components=None,
+    neighbors=4,
+    exact_tol=1.0e-9,
+):
+    metadata = load_metadata(metadata_path)
+    requested_fields = list(fields if fields is not None else _available_node_fields(metadata))
+    query_points = read_query_points(points_path)
+    with np.load(data_path) as data:
+        return _write_rows(
+            output_path,
+            _iter_interpolated_rows(
+                data,
+                metadata,
+                query_points,
+                requested_fields,
+                csv_components,
+                neighbors,
+                exact_tol,
+            ),
+        )
 
 
 def main(argv=None):

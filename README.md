@@ -85,6 +85,28 @@ CSV 分量选择只影响 `*_node_set_data.csv` 和 `*_interpolated_points.csv`�
 
 注意：当前目标点导出是节点值精确命中或反距离加权，不是基于 Abaqus 单元形函数的严格单元内插值。
 
+## 合并多个频率段结果
+
+如果同一模型分多个 ODB 计算不同频率段，例如 `1-100 Hz`、`100-200 Hz`、
+`200-300 Hz`，先分别导出默认配对文件：
+
+- `*_point_data.npz`
+- `*_point_metadata.json`
+
+然后在 GUI 主窗口点击 `合并结果`，选择多个 `*_point_data.npz`，程序会按同目录
+默认命名自动查找 `*_point_metadata.json`。合并只读取已导出的 NPZ/JSON，不重新打开
+ODB。
+
+命令行也可以直接运行：
+
+```powershell
+python -m odb_extract.merge_point_data --input a_point_data.npz b_point_data.npz --output merged_point_data.npz --metadata-output merged_point_metadata.json
+```
+
+合并前会校验节点、坐标、字段、分量和数组布局一致；所有 frame 轴数组按频率拼接并
+排序。边界重复频率在容差内数据一致时只保留一帧，不一致则停止并报错，不会静默覆盖。
+输出 NPZ/JSON 不能与任一输入 NPZ/metadata 路径相同，避免误覆盖源数据。
+
 ## 测试
 
 运行全部普通 Python 单元测试：
