@@ -230,8 +230,12 @@ def choose_field_names(fields, mode, default_fields=None):
     raise ValueError("Unknown field selection mode: {}".format(mode))
 
 
+def _default_output_dir(odb_path):
+    return os.path.join(os.path.dirname(os.path.abspath(odb_path)), "output")
+
+
 def default_output_paths(odb_path, output_dir=None):
-    output_dir = output_dir or os.path.join(os.getcwd(), "output")
+    output_dir = output_dir or _default_output_dir(odb_path)
     base_name = os.path.splitext(os.path.basename(odb_path))[0]
     return (
         os.path.join(output_dir, "{}_point_data.npz".format(base_name)),
@@ -240,7 +244,7 @@ def default_output_paths(odb_path, output_dir=None):
 
 
 def default_point_output_path(odb_path, output_dir=None):
-    output_dir = output_dir or os.path.join(os.getcwd(), "output")
+    output_dir = output_dir or _default_output_dir(odb_path)
     base_name = os.path.splitext(os.path.basename(odb_path))[0]
     return os.path.join(output_dir, "{}_interpolated_points.csv".format(base_name))
 
@@ -402,7 +406,16 @@ def _parse_metadata_output(
                 raise ValueError(malformed_message)
             return metadata
         start = output_text.find("{", start + 1)
-    raise ValueError(missing_message)
+    raise ValueError(_format_parse_error(missing_message, output_text))
+
+
+def _format_parse_error(message, output_text, max_chars=2000):
+    output_text = (output_text or "").strip()
+    if not output_text:
+        return "{}\nAbaqus output was empty.".format(message)
+    if len(output_text) > max_chars:
+        output_text = output_text[-max_chars:]
+    return "{}\nAbaqus output tail:\n{}".format(message, output_text)
 
 
 def build_node_set_list_command(abaqus_command, extractor_module, odb_path):
@@ -567,6 +580,10 @@ def _default_point_runner(**kwargs):
     return interpolate_points.interpolate_files(**kwargs)
 
 
+def _missing_file_paths(paths):
+    return [path for path in paths if path and not os.path.isfile(path)]
+
+
 def run_workflow(
     abaqus_command,
     odb_path,
@@ -592,6 +609,7 @@ def run_workflow(
     verbose=True,
     log_callback=None,
 ):
+    uses_default_point_runner = point_runner is None
     if points_path:
         default_npz, default_metadata = default_output_paths(odb_path)
         output_path = output_path or default_npz
@@ -631,10 +649,20 @@ def run_workflow(
     if code != 0 or not points_path:
         return code
 
+    if uses_default_point_runner:
+        missing_paths = _missing_file_paths([output_path, metadata_path])
+        if missing_paths:
+            raise RuntimeError(
+                "Abaqus 返回成功，但提取阶段未生成目标点导出需要的文件：{}。"
+                "请检查上方 Abaqus 日志，或手动指定 NPZ 输出和元数据 JSON。".format(
+                    ", ".join(missing_paths)
+                )
+            )
+
     if log_callback:
         log_callback(UI_TEXT["starting_point_export"])
 
-    point_runner = _default_point_runner if point_runner is None else point_runner
+    point_runner = _default_point_runner if uses_default_point_runner else point_runner
     point_runner(
         data_path=output_path,
         metadata_path=metadata_path,

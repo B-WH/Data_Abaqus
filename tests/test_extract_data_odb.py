@@ -121,6 +121,20 @@ class ExtractorTests(unittest.TestCase):
 
         self.assertIn(r"abaqus python .\odb_extract\extractor.py", str(context.exception))
 
+    def test_main_reports_unexpected_list_fields_error_as_nonzero(self):
+        stream = io.StringIO()
+
+        with mock.patch.object(
+            extractor,
+            "run_list_fields",
+            side_effect=RuntimeError("The database is from a previous release of Abaqus."),
+        ):
+            with mock.patch("sys.stderr", stream):
+                code = extractor.main(["--odb", "old.odb", "--list-fields"])
+
+        self.assertEqual(code, 1)
+        self.assertIn("previous release of Abaqus", stream.getvalue())
+
     def test_extractor_avoids_python3_only_runtime_calls_for_abaqus_614(self):
         source_path = os.path.join(os.path.dirname(extractor.__file__), "extractor.py")
         with open(source_path, "r", encoding="utf-8") as stream:

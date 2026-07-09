@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-
+#.\.venv\Scripts\pyinstaller.exe --clean --noconfirm .\Extract_ODB.spec
 
 a = Analysis(
     ['odb_extract/__main__.py'],

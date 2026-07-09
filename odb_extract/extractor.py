@@ -1084,6 +1084,9 @@ def main(argv=None):
     except ValueError as exc:
         print("ERROR: {}".format(exc), file=sys.stderr)
         return 2
+    except Exception as exc:
+        print("ERROR: {}".format(exc), file=sys.stderr)
+        return 1
     return 0
 
 

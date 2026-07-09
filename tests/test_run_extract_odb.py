@@ -299,6 +299,20 @@ class LauncherTests(unittest.TestCase):
 
         self.assertEqual(metadata["fields"], ["U"])
 
+    def test_discover_fields_includes_output_when_json_is_missing(self):
+        def fake_runner(command):
+            return 0, "Abaqus startup\nERROR: script path not found\n"
+
+        with self.assertRaises(ValueError) as context:
+            launcher.discover_fields(
+                abaqus_command="abaqus",
+                extractor_module="odb_extract.extractor",
+                odb_path="data/test1.odb",
+                runner=fake_runner,
+            )
+
+        self.assertIn("script path not found", str(context.exception))
+
     def test_parse_inspect_odb_output_reads_embedded_json(self):
         metadata = launcher.parse_inspect_odb_output(
             'Abaqus startup text {"source_odb": "x.odb", "steps": {"Step-1": {"frame_count": 2}}}\n'
@@ -409,6 +423,16 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(output_path, r"D:\work\output\test1_point_data.npz")
         self.assertEqual(metadata_path, r"D:\work\output\test1_point_metadata.json")
 
+    def test_default_output_paths_use_odb_directory_when_output_dir_is_omitted(self):
+        output_path, metadata_path = launcher.default_output_paths(
+            r"D:\work\data\test1.odb"
+        )
+
+        self.assertEqual(output_path, r"D:\work\data\output\test1_point_data.npz")
+        self.assertEqual(
+            metadata_path, r"D:\work\data\output\test1_point_metadata.json"
+        )
+
     def test_default_point_output_path_uses_odb_base_name(self):
         output_path = launcher.default_point_output_path(
             r"D:\work\data\test1.odb",
@@ -416,6 +440,13 @@ class LauncherTests(unittest.TestCase):
         )
 
         self.assertEqual(output_path, r"D:\work\output\test1_interpolated_points.csv")
+
+    def test_default_point_output_path_uses_odb_directory_when_output_dir_is_omitted(self):
+        output_path = launcher.default_point_output_path(r"D:\work\data\test1.odb")
+
+        self.assertEqual(
+            output_path, r"D:\work\data\output\test1_interpolated_points.csv"
+        )
 
     def test_default_csv_output_path_uses_odb_base_name(self):
         output_path = launcher.default_csv_output_path(
@@ -514,6 +545,25 @@ class LauncherTests(unittest.TestCase):
 
         self.assertEqual(code, 3)
         self.assertEqual(point_calls, [])
+
+    def test_run_workflow_reports_missing_extraction_outputs_before_point_export(self):
+        def fake_extraction(**_kwargs):
+            return 0
+
+        with self.assertRaises(RuntimeError) as context:
+            launcher.run_workflow(
+                abaqus_command="abaqus",
+                extractor_module="odb_extract.extractor",
+                odb_path=r"D:\work\data\test1.odb",
+                output_path=r"D:\work\output\missing.npz",
+                metadata_path=r"D:\work\output\missing.json",
+                points_path=r"D:\work\points.csv",
+                extraction_runner=fake_extraction,
+                verbose=False,
+            )
+
+        self.assertIn("提取阶段未生成", str(context.exception))
+        self.assertIn("missing.json", str(context.exception))
 
     def test_run_workflow_supplies_default_data_paths_for_point_export(self):
         calls = []
@@ -712,8 +762,24 @@ class LauncherTests(unittest.TestCase):
             )
 
     def test_parse_node_set_list_output_raises_on_no_json(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as context:
             launcher.parse_node_set_list_output("No JSON here.\n")
+
+        self.assertIn("No JSON here.", str(context.exception))
+
+    def test_discover_node_sets_includes_output_when_json_is_missing(self):
+        def fake_runner(command):
+            return 0, "Abaqus startup\nERROR: script path not found\n"
+
+        with self.assertRaises(ValueError) as context:
+            launcher.discover_node_sets(
+                abaqus_command="abaqus",
+                extractor_module="odb_extract.extractor",
+                odb_path="data/test1.odb",
+                runner=fake_runner,
+            )
+
+        self.assertIn("script path not found", str(context.exception))
 
     def test_discover_node_sets_calls_runner_and_returns_metadata(self):
         def fake_runner(command):
