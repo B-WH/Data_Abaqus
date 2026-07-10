@@ -10,28 +10,8 @@ import sys
 
 import numpy as np
 
-from odb_extract.extractor import (
-    csv_component_items,
-    csv_total_values,
-    parse_csv_component_specs,
-)
-
-
-OUTPUT_COLUMNS = [
-    "point_id",
-    "x",
-    "y",
-    "z",
-    "frequency",
-    "field",
-    "component",
-    "real",
-    "imag",
-    "method",
-    "neighbor_labels",
-    "neighbor_weights",
-    "neighbor_distances",
-]
+TOOL_NAME = "odb_extract.interpolate_points"
+METADATA_SCHEMA_VERSION = 1
 
 
 def parse_args(argv=None):
@@ -40,15 +20,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--data", required=True, help="Input NPZ from Extract_data_ODB.py.")
     parser.add_argument("--metadata", required=True, help="Input metadata JSON.")
-    parser.add_argument("--points", required=True, help="CSV containing point_id,x,y,z rows.")
-    parser.add_argument("--output", required=True, help="Output CSV path.")
+    parser.add_argument("--points", required=True, help="CSV/XLSX containing point_id,x,y,z rows.")
+    parser.add_argument("--output", required=True, help="Output NPZ path.")
+    parser.add_argument("--metadata-output", required=True, help="Output metadata JSON path.")
     parser.add_argument("--fields", nargs="+", default=None, help="Optional field names.")
-    parser.add_argument(
-        "--csv-components",
-        nargs="+",
-        default=None,
-        help="Optional CSV component selections, e.g. V=1,2,3,total.",
-    )
     parser.add_argument("--neighbors", type=int, default=4, help="Neighbor count for interpolation.")
     parser.add_argument(
         "--exact-tol",
@@ -70,34 +45,92 @@ def ensure_parent_dir(path):
         os.makedirs(parent)
 
 
-def _float_text(value):
-    return "{:.17g}".format(float(value))
+def _point_id_text(value, fallback):
+    text = "" if value is None else str(value).strip()
+    return text or str(fallback)
 
 
-def _joined_float_text(values):
-    return ";".join(_float_text(value) for value in values)
+def _points_from_rows(fieldnames, rows):
+    normalized = {
+        str(name).strip().lower(): name for name in fieldnames if name is not None
+    }
+    missing = [name for name in ("x", "y", "z") if name not in normalized]
+    if missing:
+        raise ValueError("Point file is missing required column(s): {}".format(", ".join(missing)))
+
+    points = []
+    for row_index, row in enumerate(rows, start=1):
+        x_value = row.get(normalized["x"])
+        y_value = row.get(normalized["y"])
+        z_value = row.get(normalized["z"])
+        if x_value in (None, "") and y_value in (None, "") and z_value in (None, ""):
+            continue
+        point_id_key = normalized.get("point_id")
+        points.append(
+            {
+                "point_id": _point_id_text(
+                    row.get(point_id_key) if point_id_key is not None else None,
+                    row_index,
+                ),
+                "coordinates": np.asarray(
+                    [float(x_value), float(y_value), float(z_value)],
+                    dtype=float,
+                ),
+            }
+        )
+    return points
+
+
+def _read_csv_query_points(path):
+    with open(path, newline="", encoding="utf-8") as stream:
+        reader = csv.DictReader(stream)
+        return _points_from_rows(reader.fieldnames or [], reader)
+
+
+def _read_excel_query_points(path):
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        raise ValueError("Reading Excel point files requires openpyxl.")
+
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheet = workbook.active
+        rows = sheet.iter_rows(values_only=True)
+        try:
+            fieldnames = next(rows)
+        except StopIteration:
+            raise ValueError("Point Excel file is empty.")
+        points = _points_from_rows(
+            fieldnames,
+            (dict(zip(fieldnames, row)) for row in rows),
+        )
+        return points, sheet.title
+    finally:
+        workbook.close()
 
 
 def read_query_points(path):
-    points = []
-    with open(path, newline="", encoding="utf-8") as stream:
-        reader = csv.DictReader(stream)
-        fieldnames = reader.fieldnames or []
-        missing = [name for name in ("x", "y", "z") if name not in fieldnames]
-        if missing:
-            raise ValueError("Point CSV is missing required column(s): {}".format(", ".join(missing)))
-        for row_index, row in enumerate(reader, start=1):
-            point_id = (row.get("point_id") or "").strip() or str(row_index)
-            points.append(
-                {
-                    "point_id": point_id,
-                    "coordinates": np.asarray(
-                        [float(row["x"]), float(row["y"]), float(row["z"])],
-                        dtype=float,
-                    ),
-                }
-            )
+    points, _source = read_query_point_file(path)
     return points
+
+
+def read_query_point_file(path):
+    extension = os.path.splitext(path)[1].lower()
+    if extension == ".csv":
+        return _read_csv_query_points(path), {
+            "path": os.path.abspath(path),
+            "format": "csv",
+            "worksheet": None,
+        }
+    if extension in (".xlsx", ".xlsm"):
+        points, worksheet = _read_excel_query_points(path)
+        return points, {
+            "path": os.path.abspath(path),
+            "format": extension.lstrip("."),
+            "worksheet": worksheet,
+        }
+    raise ValueError("Unsupported point file format: {}".format(extension or "<none>"))
 
 
 def _node_coordinate_lookup(data, metadata):
@@ -197,24 +230,22 @@ def _weighted_values(values, indices, weights):
     return np.tensordot(values[:, indices, :], weights, axes=([1], [0]))
 
 
-def _write_rows(output_path, rows):
+def _save_npz(output_path, arrays):
     ensure_parent_dir(output_path)
-    count = 0
-    with open(output_path, "w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=OUTPUT_COLUMNS)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-            count += 1
-    return count
+    np.savez_compressed(output_path, **arrays)
 
 
-def _iter_interpolated_rows(
+def _save_metadata(output_path, metadata):
+    ensure_parent_dir(output_path)
+    with open(output_path, "w", encoding="utf-8") as stream:
+        json.dump(metadata, stream, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _build_point_arrays(
     data,
     metadata,
     query_points,
     requested_fields,
-    csv_components,
     neighbors,
     exact_tol,
 ):
@@ -223,6 +254,23 @@ def _iter_interpolated_rows(
     }
     coordinate_lookup = _node_coordinate_lookup(data, metadata)
     frequencies = np.asarray(data["frequencies"], dtype=float)
+    point_records = [
+        {
+            "point_id": point["point_id"],
+            "coordinates": [float(value) for value in point["coordinates"]],
+            "fields": {},
+        }
+        for point in query_points
+    ]
+    arrays = {
+        "frequencies": frequencies,
+        "point_ids": np.asarray([point["point_id"] for point in query_points]),
+        "point_coordinates": np.asarray(
+            [point["coordinates"] for point in query_points],
+            dtype=float,
+        ),
+    }
+    field_outputs = {}
 
     for field_name in requested_fields:
         field_metadata = field_metadata_by_name[field_name]
@@ -232,47 +280,43 @@ def _iter_interpolated_rows(
         ]
         real_data = np.asarray(data["{}_real".format(field_name)], dtype=float)
         imag_data = np.asarray(data["{}_imag".format(field_name)], dtype=float)
-        output_items = csv_component_items(
-            field_name,
-            components,
-            None if csv_components is None else csv_components.get(field_name),
+        real_output = np.empty(
+            (len(frequencies), len(query_points), len(components)),
+            dtype=float,
         )
+        imag_output = np.empty(real_output.shape, dtype=float)
 
-        for point in query_points:
+        for point_index, point in enumerate(query_points):
             indices, weights, distances, method = _neighbor_weights(
                 node_coordinates,
                 point["coordinates"],
                 neighbors,
                 exact_tol,
             )
-            real_values = _weighted_values(real_data, indices, weights)
-            imag_values = _weighted_values(imag_data, indices, weights)
-            neighbor_labels = node_labels[indices].tolist()
-            for frame_index, frequency in enumerate(frequencies):
-                for item_type, component_index, component in output_items:
-                    if item_type == "total":
-                        real, imag = csv_total_values(
-                            real_values[frame_index],
-                            imag_values[frame_index],
-                        )
-                    else:
-                        real = real_values[frame_index, component_index]
-                        imag = imag_values[frame_index, component_index]
-                    yield {
-                        "point_id": point["point_id"],
-                        "x": _float_text(point["coordinates"][0]),
-                        "y": _float_text(point["coordinates"][1]),
-                        "z": _float_text(point["coordinates"][2]),
-                        "frequency": _float_text(frequency),
-                        "field": field_name,
-                        "component": str(component),
-                        "real": _float_text(real),
-                        "imag": _float_text(imag),
-                        "method": method,
-                        "neighbor_labels": ";".join(str(int(label)) for label in neighbor_labels),
-                        "neighbor_weights": _joined_float_text(weights),
-                        "neighbor_distances": _joined_float_text(distances),
-                    }
+            real_output[:, point_index, :] = _weighted_values(real_data, indices, weights)
+            imag_output[:, point_index, :] = _weighted_values(imag_data, indices, weights)
+            field_record = {
+                "method": method,
+                "neighbor_labels": [int(label) for label in node_labels[indices].tolist()],
+                "neighbor_weights": [float(value) for value in weights.tolist()],
+                "neighbor_distances": [float(value) for value in distances.tolist()],
+            }
+            point_records[point_index]["fields"][field_name] = field_record
+            if "method" not in point_records[point_index]:
+                point_records[point_index].update(field_record)
+
+        real_key = "{}_real".format(field_name)
+        imag_key = "{}_imag".format(field_name)
+        arrays[real_key] = real_output
+        arrays[imag_key] = imag_output
+        field_outputs[field_name] = {
+            "location": "POINT",
+            "component_count": len(components),
+            "components": list(components),
+            "array_layout": ["frame", "point", "component"],
+        }
+
+    return arrays, point_records, field_outputs
 
 
 def interpolate_files(
@@ -280,27 +324,60 @@ def interpolate_files(
     metadata_path,
     points_path,
     output_path,
+    metadata_output_path,
     fields=None,
-    csv_components=None,
     neighbors=4,
     exact_tol=1.0e-9,
 ):
-    metadata = load_metadata(metadata_path)
-    requested_fields = list(fields if fields is not None else _available_node_fields(metadata))
-    query_points = read_query_points(points_path)
+    source_metadata = load_metadata(metadata_path)
+    requested_fields = list(fields if fields is not None else _available_node_fields(source_metadata))
+    query_points, point_input = read_query_point_file(points_path)
+    if not query_points:
+        raise ValueError("Point file does not contain any coordinate rows.")
     with np.load(data_path) as data:
-        return _write_rows(
-            output_path,
-            _iter_interpolated_rows(
-                data,
-                metadata,
-                query_points,
-                requested_fields,
-                csv_components,
-                neighbors,
-                exact_tol,
-            ),
+        arrays, point_records, field_outputs = _build_point_arrays(
+            data,
+            source_metadata,
+            query_points,
+            requested_fields,
+            neighbors,
+            exact_tol,
         )
+        array_shapes = {name: list(array.shape) for name, array in arrays.items()}
+
+    array_layouts = {
+        "frequencies": ["frame"],
+        "point_ids": ["point"],
+        "point_coordinates": ["point", "coordinate"],
+    }
+    for field_name in requested_fields:
+        real_key = "{}_real".format(field_name)
+        imag_key = "{}_imag".format(field_name)
+        array_layouts[real_key] = ["frame", "point", "component"]
+        array_layouts[imag_key] = ["frame", "point", "component"]
+    metadata = {
+        "tool": {
+            "name": TOOL_NAME,
+            "metadata_schema_version": METADATA_SCHEMA_VERSION,
+        },
+        "source_data": os.path.abspath(data_path),
+        "source_metadata": os.path.abspath(metadata_path),
+        "point_input": point_input,
+        "fields": requested_fields,
+        "point_count": len(query_points),
+        "points": point_records,
+        "array_shapes": array_shapes,
+        "array_layouts": array_layouts,
+        "field_outputs": field_outputs,
+        "interpolation": {
+            "neighbors": int(neighbors),
+            "exact_tol": float(exact_tol),
+        },
+        "warnings": [],
+    }
+    _save_npz(output_path, arrays)
+    _save_metadata(metadata_output_path, metadata)
+    return metadata
 
 
 def main(argv=None):
@@ -311,8 +388,8 @@ def main(argv=None):
             metadata_path=args.metadata,
             points_path=args.points,
             output_path=args.output,
+            metadata_output_path=args.metadata_output,
             fields=args.fields,
-            csv_components=parse_csv_component_specs(args.csv_components),
             neighbors=args.neighbors,
             exact_tol=args.exact_tol,
         )

@@ -1,4 +1,3 @@
-import csv
 import io
 import json
 import importlib
@@ -157,6 +156,21 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(array.shape, (2, 2))
         self.assertTrue(np.isnan(array).all())
 
+    def test_cleanup_memmap_files_closes_mapping_before_delete(self):
+        array, path = extractor._create_memmap_array(np, (2, 2))
+        try:
+            self.assertTrue(os.path.isfile(path))
+
+            extractor._cleanup_memmap_files([path], {"values": array})
+
+            self.assertFalse(os.path.exists(path))
+        finally:
+            mmap = getattr(array, "_mmap", None)
+            if mmap is not None and not mmap.closed:
+                mmap.close()
+            if os.path.isfile(path):
+                os.remove(path)
+
     def test_log_elapsed_prints_timing_and_returns_current_time(self):
         stream = io.StringIO()
 
@@ -196,6 +210,37 @@ class ExtractorTests(unittest.TestCase):
         )
 
         self.assertEqual(extractor.collect_field_names(step), ["A", "U", "V"])
+
+    def test_collect_field_metadata_does_not_scan_later_node_frames(self):
+        class MustNotReadField(object):
+            def getSubset(self, region=None):
+                raise AssertionError("later node frame was scanned")
+
+        nodes = [extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0))]
+        step = FakeStep(
+            [
+                FakeFrame(
+                    5.0,
+                    {
+                        "U": FakeFieldOutput(
+                            [FakeValue("PART-1-1", 1, (1.0, 2.0, 3.0))],
+                            component_labels=("U1", "U2", "U3"),
+                        )
+                    },
+                ),
+                FakeFrame(10.0, {"U": MustNotReadField()}),
+            ]
+        )
+
+        frames, frequencies, field_meta, point_keys, _indexes = (
+            extractor._collect_field_metadata(step, ["U"], nodes, None, None)
+        )
+
+        self.assertEqual(len(frames), 2)
+        self.assertEqual(frequencies.tolist(), [5.0, 10.0])
+        self.assertEqual(field_meta["U"]["location"], "NODE")
+        self.assertEqual(field_meta["U"]["components"], ["U1", "U2", "U3"])
+        self.assertEqual(point_keys["U"], [("NODE", "PART-1-1", 1)])
 
     def test_inspect_odb_reports_structure_without_extracting_arrays(self):
         class HistoryRegion(object):
@@ -509,197 +554,12 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(saved_metadata["fields"], ["U"])
         self.assertEqual(saved_metadata["step"], "HARMONIC_RESPONSE")
 
-    def test_default_csv_output_path_uses_node_set_suffix(self):
-        path = extractor.default_csv_output_path(
-            r"D:\work\output\test1_point_data.npz"
-        )
+    def test_csv_output_arguments_are_not_supported(self):
+        with self.assertRaises(SystemExit):
+            extractor.parse_args(["--csv-output", "node_set_data.csv"])
 
-        self.assertEqual(path, r"D:\work\output\test1_node_set_data.csv")
-
-    def test_save_node_set_csv_writes_node_field_long_table(self):
-        arrays = {
-            "frequencies": np.array([5.0]),
-            "node_labels": np.array([25]),
-            "node_coordinates": np.array([[1.2, 0.0, 0.0]]),
-            "U_real": np.array([[[1.0, 2.0, 3.0]]]),
-            "U_imag": np.array([[[0.1, 0.2, 0.3]]]),
-        }
-        metadata = {
-            "fields": ["U"],
-            "nodes": [
-                {
-                    "instance": "PART-1-1",
-                    "label": 25,
-                    "coordinates": [1.2, 0.0, 0.0],
-                }
-            ],
-            "field_outputs": {
-                "U": {
-                    "components": ["U1", "U2", "U3"],
-                    "array_layout": ["frame", "node", "component"],
-                }
-            },
-            "warnings": [],
-        }
-        csv_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "output",
-            "unit_test",
-            "node_set_data.csv",
-        )
-
-        extractor.save_node_set_csv(csv_path, arrays, metadata)
-
-        with open(csv_path, "r", encoding="utf-8", newline="") as stream:
-            rows = list(csv.DictReader(stream))
-        self.assertEqual(len(rows), 3)
-        self.assertEqual(rows[0]["frequency_index"], "0")
-        self.assertEqual(rows[0]["frequency"], "5.0")
-        self.assertEqual(rows[0]["instance"], "PART-1-1")
-        self.assertEqual(rows[0]["node_label"], "25")
-        self.assertEqual(rows[0]["x"], "1.2")
-        self.assertEqual(rows[0]["field"], "U")
-        self.assertEqual(rows[0]["component"], "U1")
-        self.assertEqual(rows[0]["real"], "1.0")
-        self.assertEqual(rows[0]["imag"], "0.1")
-
-    def test_save_node_set_csv_can_filter_components(self):
-        arrays = {
-            "frequencies": np.array([5.0]),
-            "node_labels": np.array([25]),
-            "node_coordinates": np.array([[1.2, 0.0, 0.0]]),
-            "V_real": np.array([[[1.0, 2.0, 3.0]]]),
-            "V_imag": np.array([[[0.1, 0.2, 0.3]]]),
-        }
-        metadata = {
-            "fields": ["V"],
-            "nodes": [{"instance": "PART-1-1", "label": 25, "coordinates": [1.2, 0.0, 0.0]}],
-            "field_outputs": {
-                "V": {
-                    "components": ["V1", "V2", "V3"],
-                    "array_layout": ["frame", "node", "component"],
-                }
-            },
-            "warnings": [],
-        }
-        csv_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "output",
-            "unit_test",
-            "component_filter.csv",
-        )
-
-        extractor.save_node_set_csv(csv_path, arrays, metadata, csv_components={"V": ["1", "3"]})
-
-        with open(csv_path, "r", encoding="utf-8", newline="") as stream:
-            rows = list(csv.DictReader(stream))
-        self.assertEqual([row["component"] for row in rows], ["V1", "V3"])
-
-    def test_save_node_set_csv_can_write_total_component(self):
-        arrays = {
-            "frequencies": np.array([5.0]),
-            "node_labels": np.array([25]),
-            "node_coordinates": np.array([[1.2, 0.0, 0.0]]),
-            "V_real": np.array([[[3.0, 4.0, 12.0]]]),
-            "V_imag": np.array([[[1.0, 2.0, 2.0]]]),
-        }
-        metadata = {
-            "fields": ["V"],
-            "nodes": [{"instance": "PART-1-1", "label": 25, "coordinates": [1.2, 0.0, 0.0]}],
-            "field_outputs": {
-                "V": {
-                    "components": ["V1", "V2", "V3"],
-                    "array_layout": ["frame", "node", "component"],
-                }
-            },
-            "warnings": [],
-        }
-        csv_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "output",
-            "unit_test",
-            "component_total.csv",
-        )
-
-        extractor.save_node_set_csv(csv_path, arrays, metadata, csv_components={"V": ["total"]})
-
-        with open(csv_path, "r", encoding="utf-8", newline="") as stream:
-            rows = list(csv.DictReader(stream))
-        self.assertEqual([row["component"] for row in rows], ["V_total"])
-        self.assertEqual(float(rows[0]["real"]), 13.0)
-        self.assertEqual(float(rows[0]["imag"]), 3.0)
-
-    def test_save_node_set_csv_skips_total_for_short_vector(self):
-        arrays = {
-            "frequencies": np.array([5.0]),
-            "node_labels": np.array([25]),
-            "node_coordinates": np.array([[1.2, 0.0, 0.0]]),
-            "V_real": np.array([[[3.0, 4.0]]]),
-            "V_imag": np.array([[[1.0, 2.0]]]),
-        }
-        metadata = {
-            "fields": ["V"],
-            "nodes": [{"instance": "PART-1-1", "label": 25, "coordinates": [1.2, 0.0, 0.0]}],
-            "field_outputs": {
-                "V": {
-                    "components": ["V1", "V2"],
-                    "array_layout": ["frame", "node", "component"],
-                }
-            },
-            "warnings": [],
-        }
-        csv_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "output",
-            "unit_test",
-            "short_total.csv",
-        )
-
-        extractor.save_node_set_csv(csv_path, arrays, metadata, csv_components={"V": ["total"]})
-
-        with open(csv_path, "r", encoding="utf-8", newline="") as stream:
-            rows = list(csv.DictReader(stream))
-        self.assertEqual(rows, [])
-        self.assertIn("Field V has fewer than 3 components; skipped total CSV export.", metadata["warnings"])
-
-    def test_save_node_set_csv_skips_non_node_field_and_warns(self):
-        arrays = {
-            "frequencies": np.array([5.0]),
-            "node_labels": np.array([25]),
-            "node_coordinates": np.array([[1.2, 0.0, 0.0]]),
-            "S_real": np.array([[[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]]]),
-            "S_imag": np.array([[[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]]),
-        }
-        metadata = {
-            "fields": ["S"],
-            "nodes": [
-                {
-                    "instance": "PART-1-1",
-                    "label": 25,
-                    "coordinates": [1.2, 0.0, 0.0],
-                }
-            ],
-            "field_outputs": {
-                "S": {
-                    "components": ["S11", "S22", "S33", "S12", "S13", "S23"],
-                    "array_layout": ["frame", "element_point", "component"],
-                }
-            },
-            "warnings": [],
-        }
-        csv_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "output",
-            "unit_test",
-            "non_node_field.csv",
-        )
-
-        extractor.save_node_set_csv(csv_path, arrays, metadata)
-
-        with open(csv_path, "r", encoding="utf-8", newline="") as stream:
-            rows = list(csv.DictReader(stream))
-        self.assertEqual(rows, [])
-        self.assertIn("Field S is not a node field; skipped CSV export.", metadata["warnings"])
+        with self.assertRaises(SystemExit):
+            extractor.parse_args(["--csv-components", "V=1,total"])
 
     def test_build_metadata_records_node_coordinates_once(self):
         nodes = [

@@ -6,26 +6,21 @@ This script runs under normal Python. It delegates ODB reading to Abaqus Python.
 from __future__ import print_function
 
 import argparse
+import contextlib
+import ctypes
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
-
-from odb_extract.extractor import default_csv_output_path, parse_csv_component_specs
 
 
 ABAQUS_CANDIDATES = ("abaqus", "abq2024", "abq2023", "abq2022")
 DEFAULT_EXTRACTOR_MODULE = "odb_extract.extractor"
 DEFAULT_FIELD_TEXT = "U UR V VR A AR"
-CSV_COMPONENT_OPTIONS = (
-    ("1", "1方向"),
-    ("2", "2方向"),
-    ("3", "3方向"),
-    ("total", "总和"),
-)
 UI_TEXT = {
     "window_title": "Abaqus ODB 数据提取工具",
     "ready": "就绪",
@@ -33,8 +28,7 @@ UI_TEXT = {
     "odb_file": "ODB 文件",
     "npz_output": "NPZ 输出",
     "metadata_output": "元数据 JSON",
-    "points_file": "目标点 CSV",
-    "point_output": "目标点输出 CSV",
+    "points_file": "目标点坐标文件",
     "point_fields": "目标点字段",
     "neighbors": "邻近点数量",
     "exact_tol": "精确命中容差",
@@ -48,16 +42,13 @@ UI_TEXT = {
     "inspect_odb": "检查 ODB 结构",
     "merge_results": "合并结果",
     "available_fields": "可用场输出",
-    "csv_components": "CSV 分量",
-    "csv_component_hint": "读取场输出后可选择 CSV 输出方向。",
     "field_hint": "请选择 ODB 文件以读取场输出。",
     "run_button": "开始提取",
     "browse": "浏览",
     "select_odb_title": "选择 Abaqus ODB 文件",
     "select_npz_title": "选择 NPZ 输出文件",
     "select_metadata_title": "选择元数据 JSON 输出文件",
-    "select_points_title": "选择目标点 CSV 文件",
-    "select_point_output_title": "选择目标点输出 CSV 文件",
+    "select_points_title": "选择目标点坐标文件",
     "no_fields_found": "未找到场输出。",
     "found_fields": "已在 Step {step} 中找到 {count} 个场输出。",
     "select_odb_first": "请先选择 ODB 文件，再读取场输出。",
@@ -84,6 +75,8 @@ UI_TEXT = {
     "invalid_neighbors_message": "邻近点数量必须是正整数。",
     "invalid_exact_tol_title": "精确命中容差格式错误",
     "invalid_exact_tol_message": "精确命中容差必须是数字，或留空。",
+    "exclusive_points_node_sets_title": "输入互斥",
+    "exclusive_points_node_sets_message": "节点集和目标点坐标文件不能同时使用。",
     "starting_extraction": "开始 ODB 数据提取。",
     "starting_point_export": "开始目标点数据导出。",
     "point_export_finished_log": "目标点数据导出完成：{path}",
@@ -116,12 +109,6 @@ def parse_args(argv=None):
     parser.add_argument("--odb", help="ODB file to extract. Opens a file picker if omitted.")
     parser.add_argument("--output", help="Optional NPZ output path.")
     parser.add_argument("--metadata", help="Optional metadata JSON output path.")
-    parser.add_argument("--csv-output", help="Optional node set long-table CSV output path.")
-    parser.add_argument(
-        "--csv-components",
-        nargs="+",
-        help="Optional CSV component selections, e.g. V=1,2,3,total.",
-    )
     parser.add_argument("--step", help="Optional Abaqus step name.")
     parser.add_argument("--fields", nargs="+", help="Optional field names, e.g. U V A.")
     parser.add_argument("--instances", nargs="+", help="Optional instance names to include.")
@@ -133,8 +120,7 @@ def parse_args(argv=None):
     )
     parser.add_argument("--frequency-min", type=float, help="Optional minimum frame frequency.")
     parser.add_argument("--frequency-max", type=float, help="Optional maximum frame frequency.")
-    parser.add_argument("--points", help="Optional point CSV with point_id,x,y,z columns.")
-    parser.add_argument("--point-output", help="Optional interpolated point CSV output path.")
+    parser.add_argument("--points", help="Optional point CSV/XLSX with point_id,x,y,z columns.")
     parser.add_argument(
         "--point-fields",
         nargs="+",
@@ -161,7 +147,10 @@ def parse_args(argv=None):
         action="store_true",
         help="Print ODB structure summary as JSON and exit.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.node_sets and args.points:
+        parser.error("--node-sets and --points cannot be used together.")
+    return args
 
 
 def default_extractor_module():
@@ -199,16 +188,6 @@ def parse_node_set_text(text):
     return names or None
 
 
-def format_csv_component_specs(csv_components):
-    if not csv_components:
-        return []
-    return [
-        "{}={}".format(field_name, ",".join(csv_components[field_name]))
-        for field_name in sorted(csv_components)
-        if csv_components[field_name]
-    ]
-
-
 def parse_optional_float(value_text):
     value_text = value_text.strip()
     if not value_text:
@@ -241,12 +220,6 @@ def default_output_paths(odb_path, output_dir=None):
         os.path.join(output_dir, "{}_point_data.npz".format(base_name)),
         os.path.join(output_dir, "{}_point_metadata.json".format(base_name)),
     )
-
-
-def default_point_output_path(odb_path, output_dir=None):
-    output_dir = output_dir or _default_output_dir(odb_path)
-    base_name = os.path.splitext(os.path.basename(odb_path))[0]
-    return os.path.join(output_dir, "{}_interpolated_points.csv".format(base_name))
 
 
 def find_abaqus_command(explicit_command=None, env=None, which=None):
@@ -299,8 +272,6 @@ def build_extraction_command(
     frequency_min=None,
     frequency_max=None,
     node_sets=None,
-    csv_output_path=None,
-    csv_components=None,
 ):
     extractor_module = extractor_module or default_extractor_module()
     command = [abaqus_command, "python"]
@@ -328,12 +299,6 @@ def build_extraction_command(
     if node_sets:
         command.append("--node-sets")
         command.extend(node_sets)
-    if csv_output_path:
-        command.extend(["--csv-output", csv_output_path])
-    component_specs = format_csv_component_specs(csv_components)
-    if component_specs:
-        command.append("--csv-components")
-        command.extend(component_specs)
     return command
 
 
@@ -456,35 +421,57 @@ def discover_node_sets(abaqus_command, extractor_module, odb_path, runner=None):
     return parse_node_set_list_output(output)
 
 
+@contextlib.contextmanager
+def _external_program_dll_context():
+    bundle_dir = getattr(sys, "_MEIPASS", None)
+    if sys.platform != "win32" or not bundle_dir:
+        yield
+        return
+    ctypes.windll.kernel32.SetDllDirectoryW(None)
+    try:
+        yield
+    finally:
+        ctypes.windll.kernel32.SetDllDirectoryW(bundle_dir)
+
+
 def run_command(command, log_callback=None):
     if log_callback is None:
-        completed = subprocess.run(command)
+        with _external_program_dll_context():
+            completed = subprocess.run(command)
         return completed.returncode
 
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True,
-    )
+    with _external_program_dll_context():
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+        )
+    saw_error = False
     if process.stdout is not None:
         for line in process.stdout:
-            log_callback(line.rstrip())
-    return process.wait()
+            text = line.rstrip()
+            if "error:" in text.lower():
+                saw_error = True
+            log_callback(text)
+    code = process.wait()
+    return code if code != 0 or not saw_error else 1
 
 
 def run_command_silent(command):
-    completed = subprocess.run(command)
+    with _external_program_dll_context():
+        completed = subprocess.run(command)
     return completed.returncode
 
 
 def run_command_capture(command):
-    completed = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True,
-    )
+    with _external_program_dll_context():
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+        )
     return completed.returncode, completed.stdout or ""
 
 
@@ -538,8 +525,6 @@ def run_extraction(
     frequency_min=None,
     frequency_max=None,
     node_sets=None,
-    csv_output_path=None,
-    csv_components=None,
     runner=None,
     verbose=True,
     log_callback=None,
@@ -558,8 +543,6 @@ def run_extraction(
         frequency_min=frequency_min,
         frequency_max=frequency_max,
         node_sets=node_sets,
-        csv_output_path=csv_output_path,
-        csv_components=csv_components,
     )
     if verbose:
         print(
@@ -584,6 +567,27 @@ def _missing_file_paths(paths):
     return [path for path in paths if path and not os.path.isfile(path)]
 
 
+def _temporary_output_pair(output_path):
+    output_dir = tempfile.gettempdir()
+    base_name = os.path.splitext(os.path.basename(output_path))[0] or "points"
+    npz_fd, npz_path = tempfile.mkstemp(
+        prefix="odb_extract_{}_".format(base_name), suffix=".npz", dir=output_dir
+    )
+    json_fd, json_path = tempfile.mkstemp(
+        prefix="odb_extract_{}_".format(base_name), suffix=".json", dir=output_dir
+    )
+    os.close(npz_fd)
+    os.close(json_fd)
+    _remove_file_if_exists(npz_path)
+    _remove_file_if_exists(json_path)
+    return npz_path, json_path
+
+
+def _remove_file_if_exists(path):
+    if path and os.path.isfile(path):
+        os.remove(path)
+
+
 def run_workflow(
     abaqus_command,
     odb_path,
@@ -597,10 +601,7 @@ def run_workflow(
     frequency_min=None,
     frequency_max=None,
     node_sets=None,
-    csv_output_path=None,
-    csv_components=None,
     points_path=None,
-    point_output_path=None,
     point_fields=None,
     neighbors=4,
     exact_tol=1.0e-9,
@@ -609,74 +610,84 @@ def run_workflow(
     verbose=True,
     log_callback=None,
 ):
+    if node_sets and points_path:
+        raise ValueError("--node-sets and --points cannot be used together.")
+
     uses_default_point_runner = point_runner is None
+    temp_output_path = None
+    temp_metadata_path = None
     if points_path:
         default_npz, default_metadata = default_output_paths(odb_path)
         output_path = output_path or default_npz
         metadata_path = metadata_path or default_metadata
-        point_output_path = point_output_path or default_point_output_path(odb_path)
+        temp_output_path, temp_metadata_path = _temporary_output_pair(output_path)
+        extraction_output_path = temp_output_path
+        extraction_metadata_path = temp_metadata_path
+    else:
+        extraction_output_path = output_path
+        extraction_metadata_path = metadata_path
     if node_sets:
         default_npz, default_metadata = default_output_paths(odb_path)
         output_path = output_path or default_npz
         metadata_path = metadata_path or default_metadata
-        if csv_components == {}:
-            csv_output_path = None
-        else:
-            csv_output_path = csv_output_path or default_csv_output_path(output_path)
+        extraction_output_path = output_path
+        extraction_metadata_path = metadata_path
 
     if log_callback:
         log_callback(UI_TEXT["starting_extraction"])
 
     extraction_runner = run_extraction if extraction_runner is None else extraction_runner
-    code = extraction_runner(
-        abaqus_command=abaqus_command,
-        odb_path=odb_path,
-        extractor_module=extractor_module or default_extractor_module(),
-        output_path=output_path,
-        metadata_path=metadata_path,
-        step_name=step_name,
-        fields=fields,
-        instances=instances,
-        node_labels=node_labels,
-        frequency_min=frequency_min,
-        frequency_max=frequency_max,
-        node_sets=node_sets,
-        csv_output_path=csv_output_path,
-        csv_components=csv_components,
-        verbose=verbose,
-        log_callback=log_callback,
-    )
-    if code != 0 or not points_path:
-        return code
+    try:
+        code = extraction_runner(
+            abaqus_command=abaqus_command,
+            odb_path=odb_path,
+            extractor_module=extractor_module or default_extractor_module(),
+            output_path=extraction_output_path,
+            metadata_path=extraction_metadata_path,
+            step_name=step_name,
+            fields=fields,
+            instances=instances,
+            node_labels=node_labels,
+            frequency_min=frequency_min,
+            frequency_max=frequency_max,
+            node_sets=node_sets,
+            verbose=verbose,
+            log_callback=log_callback,
+        )
+        if code != 0 or not points_path:
+            return code
 
-    if uses_default_point_runner:
-        missing_paths = _missing_file_paths([output_path, metadata_path])
-        if missing_paths:
-            raise RuntimeError(
-                "Abaqus 返回成功，但提取阶段未生成目标点导出需要的文件：{}。"
-                "请检查上方 Abaqus 日志，或手动指定 NPZ 输出和元数据 JSON。".format(
-                    ", ".join(missing_paths)
+        if uses_default_point_runner:
+            missing_paths = _missing_file_paths([temp_output_path, temp_metadata_path])
+            if missing_paths:
+                raise RuntimeError(
+                    "Abaqus 返回成功，但提取阶段未生成目标点导出需要的文件：{}。"
+                    "请检查上方 Abaqus 日志，或手动指定 NPZ 输出和元数据 JSON。".format(
+                        ", ".join(missing_paths)
+                    )
                 )
-            )
 
-    if log_callback:
-        log_callback(UI_TEXT["starting_point_export"])
+        if log_callback:
+            log_callback(UI_TEXT["starting_point_export"])
 
-    point_runner = _default_point_runner if uses_default_point_runner else point_runner
-    point_runner(
-        data_path=output_path,
-        metadata_path=metadata_path,
-        points_path=points_path,
-        output_path=point_output_path,
-        fields=point_fields,
-        csv_components=csv_components,
-        neighbors=neighbors,
-        exact_tol=exact_tol,
-    )
+        point_runner = _default_point_runner if uses_default_point_runner else point_runner
+        point_runner(
+            data_path=temp_output_path,
+            metadata_path=temp_metadata_path,
+            points_path=points_path,
+            output_path=output_path,
+            metadata_output_path=metadata_path,
+            fields=point_fields,
+            neighbors=neighbors,
+            exact_tol=exact_tol,
+        )
 
-    if log_callback:
-        log_callback(UI_TEXT["point_export_finished_log"].format(path=point_output_path))
-    return 0
+        if log_callback:
+            log_callback(UI_TEXT["point_export_finished_log"].format(path=output_path))
+        return 0
+    finally:
+        _remove_file_if_exists(temp_output_path)
+        _remove_file_if_exists(temp_metadata_path)
 
 
 def run_cli(argv=None):
@@ -695,8 +706,6 @@ def run_cli(argv=None):
             file=sys.stderr,
         )
         return 2
-    csv_components = parse_csv_component_specs(args.csv_components)
-
     if args.inspect_odb:
         metadata = inspect_odb_structure(
             abaqus_command=abaqus_command,
@@ -719,13 +728,11 @@ def run_cli(argv=None):
         frequency_min=args.frequency_min,
         frequency_max=args.frequency_max,
         node_sets=args.node_sets,
-        csv_output_path=args.csv_output,
-        csv_components=csv_components,
         points_path=args.points,
-        point_output_path=args.point_output,
         point_fields=args.point_fields,
         neighbors=args.neighbors,
         exact_tol=args.exact_tol,
+        verbose=sys.stdout is not None,
     )
 
 
@@ -743,7 +750,6 @@ class ExtractOdbApp(object):
         self.output_var = tk.StringVar()
         self.metadata_var = tk.StringVar()
         self.points_var = tk.StringVar()
-        self.point_output_var = tk.StringVar()
         self.point_fields_var = tk.StringVar()
         self.neighbors_var = tk.StringVar(value="4")
         self.exact_tol_var = tk.StringVar(value="1e-9")
@@ -757,7 +763,6 @@ class ExtractOdbApp(object):
         self.status_var = tk.StringVar(value=UI_TEXT["ready"])
         self._running = False
         self.field_vars = {}
-        self.csv_component_vars = {}
         self.node_sets_var = tk.StringVar()
         self.node_set_vars = {}
 
@@ -797,14 +802,7 @@ class ExtractOdbApp(object):
             frame, 2, UI_TEXT["metadata_output"], self.metadata_var, self.choose_metadata
         )
         self._add_path_row(frame, 3, UI_TEXT["points_file"], self.points_var, self.choose_points)
-        self._add_path_row(
-            frame,
-            4,
-            UI_TEXT["point_output"],
-            self.point_output_var,
-            self.choose_point_output,
-        )
-        self._add_path_row(frame, 5, UI_TEXT["abaqus_command"], self.abaqus_var, None)
+        self._add_path_row(frame, 4, UI_TEXT["abaqus_command"], self.abaqus_var, None)
         ttk.Label(frame, text="Step").grid(row=7, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.step_var).grid(
             row=7, column=1, columnspan=2, sticky="ew", pady=4
@@ -923,8 +921,6 @@ class ExtractOdbApp(object):
         )
         self.field_hint.grid(row=0, column=0, sticky="w", padx=8, pady=8)
 
-        self._build_csv_component_widgets(frame, 17)
-
         button_bar = ttk.Frame(frame)
         button_bar.grid(row=18, column=0, columnspan=3, sticky="ew", pady=(8, 6))
         self.run_button = ttk.Button(button_bar, text=UI_TEXT["run_button"], command=self.run)
@@ -962,26 +958,6 @@ class ExtractOdbApp(object):
             ttk.Button(frame, text=UI_TEXT["browse"], command=command).grid(
                 row=row, column=2, sticky="ew", pady=4
             )
-
-    def _build_csv_component_widgets(self, frame, row):
-        from tkinter import ttk
-
-        self.csv_component_box = ttk.LabelFrame(frame, text=UI_TEXT["csv_components"])
-        self.csv_component_box.grid(
-            row=row, column=0, columnspan=3, sticky="ew", pady=(0, 8)
-        )
-        self.csv_component_frame = ttk.Frame(self.csv_component_box)
-        self.csv_component_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
-        self.csv_component_hint = ttk.Label(
-            self.csv_component_frame,
-            text=UI_TEXT["csv_component_hint"],
-        )
-        self.csv_component_hint.grid(row=0, column=0, sticky="w")
-
-    def _clear_csv_component_checks(self):
-        for child in self.csv_component_frame.winfo_children():
-            child.destroy()
-        self.csv_component_vars = {}
 
     def _build_node_set_widgets(self, frame, row_offset):
         """Build node set filter row: label, text entry, and action buttons."""
@@ -1067,8 +1043,6 @@ class ExtractOdbApp(object):
             output_path, metadata_path = default_output_paths(path)
             self.output_var.set(output_path)
             self.metadata_var.set(metadata_path)
-        if not self.point_output_var.get().strip():
-            self.point_output_var.set(default_point_output_path(path))
         self.refresh_fields()
         self.refresh_node_sets()
 
@@ -1109,30 +1083,15 @@ class ExtractOdbApp(object):
 
         path = filedialog.askopenfilename(
             title=UI_TEXT["select_points_title"],
-            filetypes=(("CSV", "*.csv"), ("All files", "*.*")),
+            filetypes=(
+                ("Point files", "*.csv *.xlsx *.xlsm"),
+                ("CSV", "*.csv"),
+                ("Excel", "*.xlsx *.xlsm"),
+                ("All files", "*.*"),
+            ),
         )
         if path:
             self.points_var.set(path)
-            if not self.point_output_var.get().strip():
-                self.point_output_var.set(
-                    default_point_output_path(self.odb_var.get().strip() or path)
-                )
-
-    def choose_point_output(self):
-        from tkinter import filedialog
-
-        initial = self.point_output_var.get().strip() or default_point_output_path(
-            self.odb_var.get().strip() or "odb"
-        )
-        path = filedialog.asksaveasfilename(
-            title=UI_TEXT["select_point_output_title"],
-            defaultextension=".csv",
-            initialfile=os.path.basename(initial),
-            initialdir=os.path.dirname(initial) or os.getcwd(),
-            filetypes=(("CSV", "*.csv"), ("All files", "*.*")),
-        )
-        if path:
-            self.point_output_var.set(path)
 
     def log(self, message):
         self.log_text.insert("end", "{}\n".format(message))
@@ -1228,37 +1187,6 @@ class ExtractOdbApp(object):
             child.destroy()
         self.field_vars = {}
 
-    def _show_csv_component_matrix(self, fields):
-        tk = self.tk
-        from tkinter import ttk
-
-        self._clear_csv_component_checks()
-        if not fields:
-            ttk.Label(
-                self.csv_component_frame,
-                text=UI_TEXT["csv_component_hint"],
-            ).grid(row=0, column=0, sticky="w")
-            return
-
-        ttk.Label(self.csv_component_frame, text="").grid(row=0, column=0, padx=6, pady=2)
-        for column, field_name in enumerate(fields, start=1):
-            ttk.Label(self.csv_component_frame, text=field_name).grid(
-                row=0, column=column, padx=6, pady=2
-            )
-            self.csv_component_vars[field_name] = {}
-
-        for row, (key, label) in enumerate(CSV_COMPONENT_OPTIONS, start=1):
-            ttk.Label(self.csv_component_frame, text=label).grid(
-                row=row, column=0, sticky="w", padx=6, pady=2
-            )
-            for column, field_name in enumerate(fields, start=1):
-                variable = tk.BooleanVar(value=key != "total")
-                self.csv_component_vars[field_name][key] = variable
-                ttk.Checkbutton(
-                    self.csv_component_frame,
-                    variable=variable,
-                ).grid(row=row, column=column, padx=6, pady=2)
-
     def _set_field_selection(self, mode):
         selected = set(choose_field_names(self.field_vars.keys(), mode))
         for field_name, variable in self.field_vars.items():
@@ -1279,13 +1207,11 @@ class ExtractOdbApp(object):
 
         fields = metadata.get("fields", [])
         self._clear_field_checks()
-        self._clear_csv_component_checks()
         if not fields:
             ttk.Label(self.field_checks_frame, text=UI_TEXT["no_fields_found"]).grid(
                 row=0, column=0, sticky="w", padx=8, pady=8
             )
             self.fields_var.set("")
-            self._show_csv_component_matrix([])
             return
 
         default_fields = set(parse_field_text(DEFAULT_FIELD_TEXT) or [])
@@ -1306,7 +1232,6 @@ class ExtractOdbApp(object):
             for variable in self.field_vars.values():
                 variable.set(True)
         self._sync_fields_from_checks()
-        self._show_csv_component_matrix(fields)
         self.field_canvas.yview_moveto(0)
         self.log(UI_TEXT["found_fields"].format(step=metadata.get("step", ""), count=len(fields)))
 
@@ -1475,24 +1400,6 @@ class ExtractOdbApp(object):
             ]
         return parse_field_text(self.fields_var.get())
 
-    def _selected_csv_components(self, fields):
-        csv_component_vars = getattr(self, "csv_component_vars", {})
-        if not csv_component_vars or not fields:
-            return None
-        selections = {}
-        for field_name in fields:
-            component_vars = csv_component_vars.get(field_name)
-            if not component_vars:
-                continue
-            selected = [
-                key
-                for key, _label in CSV_COMPONENT_OPTIONS
-                if key in component_vars and component_vars[key].get()
-            ]
-            if selected:
-                selections[field_name] = selected
-        return selections
-
     def _validate_inputs(self):
         from tkinter import messagebox
 
@@ -1557,9 +1464,13 @@ class ExtractOdbApp(object):
         metadata_path = self.metadata_var.get().strip() or None
         step_name = self.step_var.get().strip() or None
         points_path = self.points_var.get().strip() or None
-        point_output_path = self.point_output_var.get().strip() or None
         point_fields = parse_field_text(self.point_fields_var.get())
-        csv_components = self._selected_csv_components(fields)
+        if node_sets and points_path:
+            messagebox.showerror(
+                UI_TEXT["exclusive_points_node_sets_title"],
+                UI_TEXT["exclusive_points_node_sets_message"],
+            )
+            return None
         return {
             "abaqus_command": abaqus_command,
             "odb_path": odb_path,
@@ -1573,9 +1484,7 @@ class ExtractOdbApp(object):
             "frequency_min": frequency_min,
             "frequency_max": frequency_max,
             "node_sets": node_sets,
-            "csv_components": csv_components,
             "points_path": points_path,
-            "point_output_path": point_output_path,
             "point_fields": point_fields,
             "neighbors": neighbors,
             "exact_tol": exact_tol if exact_tol is not None else 1.0e-9,

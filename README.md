@@ -15,7 +15,7 @@
 python -m pip install -r requirements.txt
 ```
 
-`requirements.txt` 当前用于安装 `mesh_convert` 需要的 `gmsh`。如果使用 `odb_extract` 的目标点后处理，并且普通 Python 环境缺少 NumPy，请额外安装：
+`requirements.txt` 当前用于安装 `mesh_convert` 需要的 `gmsh`，以及目标点 Excel 输入需要的 `openpyxl`。如果使用 `odb_extract` 的目标点后处理，并且普通 Python 环境缺少 NumPy，请额外安装：
 
 ```powershell
 python -m pip install numpy
@@ -29,7 +29,7 @@ python -m pip install numpy
 
 - `python -m odb_extract` 是普通 Python 入口，负责 GUI、参数校验、调用 Abaqus 命令和后处理串联。
 - `odb_extract.extractor` 必须由 Abaqus Python 执行，负责实际读取 `.odb`；启动器会自动用脚本绝对路径调用它，因此可从项目目录以外启动。
-- `odb_extract.interpolate_points` 是普通 Python 后处理脚本，读取已导出的 NPZ、metadata JSON 和目标点 CSV。
+- `odb_extract.interpolate_points` 是普通 Python 后处理脚本，读取已导出的 NPZ、metadata JSON 和目标点坐标文件，并输出目标点 NPZ/JSON。
 
 普通 Python 不能直接导入 Abaqus 的 `odbAccess`。如果手动运行提取脚本，应改用 Abaqus Python，例如：
 
@@ -50,9 +50,10 @@ GUI 中通常按以下顺序操作：
 1. 选择 `.odb` 文件。
 2. 点击“读取场输出”，勾选需要导出的字段。
 3. 按需填写实例、节点编号、节点集、频率范围过滤。
-4. 在“CSV 分量”中按字段选择 1/2/3 方向或总和；默认输出 1/2/3 方向。
-5. 如需按坐标取点，选择目标点 CSV，并确认目标点输出 CSV 路径。
-6. 点击“开始提取”。
+4. 如需按坐标取点，选择目标点坐标文件（`.csv`、`.xlsx` 或 `.xlsm`）。
+5. 点击“开始提取”。
+
+节点集和目标点坐标文件是两种互斥输入方式，不能同时填写。
 
 CLI 仍保留用于自动化：
 
@@ -64,23 +65,18 @@ python -m odb_extract --odb data\test1.odb --fields U V A
 
 ```powershell
 python -m odb_extract --odb data\test1.odb --points points.csv --point-fields U V
+python -m odb_extract --odb data\test1.odb --points points.xlsx --point-fields U V
 ```
 
-按节点集导出时会自动额外生成 CSV 长表：
+按节点集过滤导出：
 
 ```powershell
 python -m odb_extract --odb data\test1.odb --node-sets NSET_TOP
 ```
 
-只在 CSV 中输出 `V1` 和总速度：
+### 目标点坐标文件格式
 
-```powershell
-python -m odb_extract --odb data\test1.odb --node-sets NSET_TOP --csv-components V=1,total
-```
-
-### 目标点 CSV 格式
-
-目标点 CSV 至少需要这些列：
+目标点坐标文件可以是 `.csv`、`.xlsx` 或 `.xlsm`。首行表头至少需要这些列：
 
 ```csv
 point_id,x,y,z
@@ -89,22 +85,29 @@ p2,1.0,0.0,0.0
 ```
 
 `point_id` 可为空；为空时程序按行号生成点编号。
+Excel 文件默认读取第一个工作表，不支持旧 `.xls` 格式。
 
 ### 输出文件
 
 - `*_point_data.npz`：数值数组，包括频率、节点标签、节点坐标、各字段实部和虚部。
 - `*_point_metadata.json`：字段、节点、坐标、数组布局、过滤条件和 warning 信息。
-- `*_node_set_data.csv`：按节点集导出时自动生成的长表，列为 `frequency_index,frequency,instance,node_label,x,y,z,field,component,real,imag`。
-- `*_interpolated_points.csv`：目标点长表结果。
 
-节点集 CSV 只写入节点布局字段（`frame,node,component`）。单元场或积分点场仍保留在 NPZ/metadata 中，并在 metadata 的 `warnings` 中记录 CSV 跳过原因。
+程序不再导出 CSV。节点集只作为过滤条件写入这对 NPZ/JSON。
 
-CSV 分量选择只影响 `*_node_set_data.csv` 和 `*_interpolated_points.csv`，不裁剪 NPZ。`总和` 行的 `component` 为 `<field>_total`，例如 `V_total`；其实部和虚部分别按前三个方向平方和开方计算。
+目标点坐标模式也输出同名 NPZ/JSON，其中 NPZ 包含：
 
-目标点 CSV 输出中的 `method` 表示取值方式：
+- `frequencies`：频率轴。
+- `point_ids`：输入点编号。
+- `point_coordinates`：输入点坐标。
+- `<field>_real` / `<field>_imag`：形状为 `frame,point,component` 的目标点结果。
+
+metadata JSON 中的 `points[].method` 表示取值方式：
 
 - `exact`：目标点坐标在容差内命中某个节点，直接使用该节点值。
 - `weighted`：未命中节点时，使用邻近节点反距离加权。
+
+`points[]` 还会记录 `neighbor_labels`、`neighbor_weights` 和 `neighbor_distances`；
+`points[].fields[field]` 保留每个输出字段对应的同类取值明细。
 
 注意：当前目标点导出是节点值精确命中或反距离加权，不是基于 Abaqus 单元形函数的严格单元内插值。
 
@@ -153,7 +156,7 @@ python -m unittest tests.test_extract_data_odb tests.test_interpolate_odb_points
 
 - `odb_extract/extractor.py`
 
-`Extract_ODB.spec` 已配置该文件；修改提取脚本后需要重新打包。
+`Extract_ODB.spec` 已配置该文件，并保留目标点后处理模块；修改提取或后处理脚本后需要重新打包。
 
 ## STEP/STP/INS 几何转 Abaqus INP 网格
 

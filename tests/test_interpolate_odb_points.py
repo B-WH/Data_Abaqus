@@ -5,6 +5,7 @@ import sys
 import unittest
 
 import numpy as np
+from openpyxl import Workbook
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -24,7 +25,11 @@ class InterpolateOdbPointsTests(unittest.TestCase):
         self.data_path = os.path.join(self.work_dir, "sample.npz")
         self.metadata_path = os.path.join(self.work_dir, "sample_metadata.json")
         self.points_path = os.path.join(self.work_dir, "points.csv")
-        self.output_path = os.path.join(self.work_dir, "result.csv")
+        self.xlsx_points_path = os.path.join(self.work_dir, "points.xlsx")
+        self.output_path = os.path.join(self.work_dir, "result_point_data.npz")
+        self.metadata_output_path = os.path.join(
+            self.work_dir, "result_point_metadata.json"
+        )
         self._write_sample_inputs()
 
     def _write_sample_inputs(self):
@@ -139,9 +144,19 @@ class InterpolateOdbPointsTests(unittest.TestCase):
             for row in rows:
                 writer.writerow(row)
 
-    def _read_output(self):
-        with open(self.output_path, newline="", encoding="utf-8") as stream:
-            return list(csv.DictReader(stream))
+    def _write_xlsx_points(self, rows):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["point_id", "x", "y", "z"])
+        for row in rows:
+            sheet.append([row.get("point_id"), row["x"], row["y"], row["z"]])
+        workbook.save(self.xlsx_points_path)
+
+    def _read_outputs(self):
+        data = np.load(self.output_path)
+        with open(self.metadata_output_path, "r", encoding="utf-8") as stream:
+            metadata = json.load(stream)
+        return data, metadata
 
     def test_exact_coordinate_uses_matching_node_value(self):
         self._write_points([{"point_id": "p1", "x": "1.0", "y": "0.0", "z": "0.0"}])
@@ -156,47 +171,65 @@ class InterpolateOdbPointsTests(unittest.TestCase):
                 self.points_path,
                 "--output",
                 self.output_path,
+                "--metadata-output",
+                self.metadata_output_path,
                 "--fields",
                 "U",
             ]
         )
 
         self.assertEqual(code, 0)
-        rows = self._read_output()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["method"], "exact")
-        self.assertEqual(rows[0]["neighbor_labels"], "2")
-        self.assertEqual(float(rows[0]["real"]), 20.0)
-        self.assertEqual(float(rows[0]["imag"]), 2.0)
+        data, metadata = self._read_outputs()
+        self.assertEqual(data["point_ids"].tolist(), ["p1"])
+        self.assertEqual(data["point_coordinates"].tolist(), [[1.0, 0.0, 0.0]])
+        self.assertEqual(data["frequencies"].tolist(), [5.0])
+        self.assertEqual(data["U_real"].shape, (1, 1, 1))
+        self.assertEqual(float(data["U_real"][0, 0, 0]), 20.0)
+        self.assertEqual(float(data["U_imag"][0, 0, 0]), 2.0)
+        self.assertEqual(metadata["array_layouts"]["U_real"], ["frame", "point", "component"])
+        self.assertEqual(metadata["points"][0]["method"], "exact")
+        self.assertEqual(metadata["points"][0]["neighbor_labels"], [2])
+        self.assertEqual(metadata["points"][0]["neighbor_weights"], [1.0])
+        self.assertEqual(metadata["points"][0]["fields"]["U"]["neighbor_labels"], [2])
 
     def test_non_node_coordinate_uses_inverse_distance_neighbors(self):
         self._write_points([{"point_id": "p2", "x": "0.25", "y": "0.25", "z": "0.25"}])
 
-        interp.main(
-            [
-                "--data",
-                self.data_path,
-                "--metadata",
-                self.metadata_path,
-                "--points",
-                self.points_path,
-                "--output",
-                self.output_path,
-                "--fields",
-                "U",
-            ]
+        interp.interpolate_files(
+            data_path=self.data_path,
+            metadata_path=self.metadata_path,
+            points_path=self.points_path,
+            output_path=self.output_path,
+            metadata_output_path=self.metadata_output_path,
+            fields=["U"],
         )
 
-        rows = self._read_output()
+        data, metadata = self._read_outputs()
         distances = np.array([0.4330127018922193, 0.82915619758885, 0.82915619758885, 0.82915619758885])
         weights = (1.0 / distances) / np.sum(1.0 / distances)
         expected_real = float(np.dot(weights, np.array([10.0, 20.0, 30.0, 40.0])))
         expected_imag = float(np.dot(weights, np.array([1.0, 2.0, 3.0, 4.0])))
 
-        self.assertEqual(rows[0]["method"], "weighted")
-        self.assertEqual(rows[0]["neighbor_labels"], "1;2;3;4")
-        self.assertAlmostEqual(float(rows[0]["real"]), expected_real)
-        self.assertAlmostEqual(float(rows[0]["imag"]), expected_imag)
+        self.assertEqual(metadata["points"][0]["method"], "weighted")
+        self.assertEqual(metadata["points"][0]["neighbor_labels"], [1, 2, 3, 4])
+        self.assertEqual(metadata["points"][0]["fields"]["U"]["neighbor_labels"], [1, 2, 3, 4])
+        self.assertAlmostEqual(float(data["U_real"][0, 0, 0]), expected_real)
+        self.assertAlmostEqual(float(data["U_imag"][0, 0, 0]), expected_imag)
+
+    def test_empty_points_file_is_rejected(self):
+        self._write_points([])
+
+        with self.assertRaises(ValueError) as context:
+            interp.interpolate_files(
+                data_path=self.data_path,
+                metadata_path=self.metadata_path,
+                points_path=self.points_path,
+                output_path=self.output_path,
+                metadata_output_path=self.metadata_output_path,
+                fields=["U"],
+            )
+
+        self.assertIn("does not contain any coordinate rows", str(context.exception))
 
     def test_neighbor_search_uses_partial_selection_for_requested_count(self):
         original_argpartition = interp.np.argpartition
@@ -243,16 +276,20 @@ class InterpolateOdbPointsTests(unittest.TestCase):
                 self.points_path,
                 "--output",
                 self.output_path,
+                "--metadata-output",
+                self.metadata_output_path,
                 "--fields",
                 "V",
             ]
         )
 
-        rows = self._read_output()
-        self.assertEqual([row["field"] for row in rows], ["V"])
-        self.assertEqual(float(rows[0]["real"]), 100.0)
+        data, metadata = self._read_outputs()
+        self.assertIn("V_real", data.files)
+        self.assertNotIn("U_real", data.files)
+        self.assertEqual(metadata["fields"], ["V"])
+        self.assertEqual(float(data["V_real"][0, 0, 0]), 100.0)
 
-    def test_csv_components_filter_and_total_output(self):
+    def test_three_component_field_outputs_all_components(self):
         self._write_three_component_v_inputs()
         self._write_points([{"point_id": "p1", "x": "0.0", "y": "0.0", "z": "0.0"}])
 
@@ -261,33 +298,52 @@ class InterpolateOdbPointsTests(unittest.TestCase):
             metadata_path=self.metadata_path,
             points_path=self.points_path,
             output_path=self.output_path,
+            metadata_output_path=self.metadata_output_path,
             fields=["V"],
-            csv_components={"V": ["2", "total"]},
         )
 
-        rows = self._read_output()
-        self.assertEqual([row["component"] for row in rows], ["V2", "V_total"])
-        self.assertEqual(float(rows[0]["real"]), 4.0)
-        self.assertEqual(float(rows[0]["imag"]), 2.0)
-        self.assertEqual(float(rows[1]["real"]), 13.0)
-        self.assertEqual(float(rows[1]["imag"]), 3.0)
+        data, metadata = self._read_outputs()
+        self.assertEqual(data["V_real"].shape, (1, 1, 3))
+        self.assertEqual(data["V_real"][0, 0].tolist(), [3.0, 4.0, 12.0])
+        self.assertEqual(metadata["field_outputs"]["V"]["components"], ["V1", "V2", "V3"])
 
     def test_default_fields_skip_non_node_outputs(self):
         self._write_points([{"point_id": "p1", "x": "0.0", "y": "0.0", "z": "0.0"}])
 
-        row_count = interp.interpolate_files(
+        metadata = interp.interpolate_files(
             data_path=self.data_path,
             metadata_path=self.metadata_path,
             points_path=self.points_path,
             output_path=self.output_path,
+            metadata_output_path=self.metadata_output_path,
             fields=None,
         )
 
-        rows = self._read_output()
-        self.assertEqual(row_count, 2)
-        self.assertEqual([row["field"] for row in rows], ["U", "V"])
-        self.assertEqual(float(rows[0]["real"]), 10.0)
-        self.assertEqual(float(rows[1]["real"]), 100.0)
+        data, saved_metadata = self._read_outputs()
+        self.assertEqual(metadata["fields"], ["U", "V"])
+        self.assertEqual(saved_metadata["fields"], ["U", "V"])
+        self.assertIn("U_real", data.files)
+        self.assertIn("V_real", data.files)
+        self.assertNotIn("S_real", data.files)
+        self.assertEqual(float(data["U_real"][0, 0, 0]), 10.0)
+        self.assertEqual(float(data["V_real"][0, 0, 0]), 100.0)
+
+    def test_xlsx_points_input_writes_same_npz_contract(self):
+        self._write_xlsx_points([{"point_id": "p1", "x": 1.0, "y": 0.0, "z": 0.0}])
+
+        interp.interpolate_files(
+            data_path=self.data_path,
+            metadata_path=self.metadata_path,
+            points_path=self.xlsx_points_path,
+            output_path=self.output_path,
+            metadata_output_path=self.metadata_output_path,
+            fields=["U"],
+        )
+
+        data, metadata = self._read_outputs()
+        self.assertEqual(data["point_ids"].tolist(), ["p1"])
+        self.assertEqual(float(data["U_real"][0, 0, 0]), 20.0)
+        self.assertEqual(metadata["point_input"]["worksheet"], "Sheet")
 
     def test_interpolate_files_closes_loaded_npz(self):
         self._write_points([{"point_id": "p1", "x": "0.0", "y": "0.0", "z": "0.0"}])
@@ -299,17 +355,17 @@ class InterpolateOdbPointsTests(unittest.TestCase):
 
         interp.np.load = fake_load
         try:
-            row_count = interp.interpolate_files(
+            interp.interpolate_files(
                 data_path=self.data_path,
                 metadata_path=self.metadata_path,
                 points_path=self.points_path,
                 output_path=self.output_path,
+                metadata_output_path=self.metadata_output_path,
                 fields=["U"],
             )
         finally:
             interp.np.load = original_load
 
-        self.assertEqual(row_count, 1)
         self.assertIsNone(loaded.zip)
 
     def test_element_field_is_rejected(self):
@@ -321,6 +377,7 @@ class InterpolateOdbPointsTests(unittest.TestCase):
                 metadata_path=self.metadata_path,
                 points_path=self.points_path,
                 output_path=self.output_path,
+                metadata_output_path=self.metadata_output_path,
                 fields=["S"],
             )
 
