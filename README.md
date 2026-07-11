@@ -55,6 +55,8 @@ GUI 中通常按以下顺序操作：
 
 节点集和目标点坐标文件是两种互斥输入方式，不能同时填写。
 
+如果同一个 ODB 需要反复导出不同目标点，可勾选“保留并复用全模型已选场缓存”。缓存只包含当前勾选的场输出；更改 ODB、Step、字段、实例/节点/节点集或频率范围后会自动重新提取。一次性导出时保持不勾选，程序继续使用并清理临时 NPZ/JSON。节点场在 Abaqus 支持时使用 bulkDataBlocks 批量读取；接口不可用或数据块不兼容时自动回退到逐值读取。
+
 CLI 仍保留用于自动化：
 
 ```powershell
@@ -64,8 +66,8 @@ python -m odb_extract --odb data\test1.odb --fields U V A
 带目标点导出：
 
 ```powershell
-python -m odb_extract --odb data\test1.odb --points points.csv --point-fields U V
-python -m odb_extract --odb data\test1.odb --points points.xlsx --point-fields U V
+python -m odb_extract --odb data\test1.odb --points points.csv --fields U V
+python -m odb_extract --odb data\test1.odb --points points.xlsx --fields U V
 ```
 
 按节点集过滤导出：

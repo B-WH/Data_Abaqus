@@ -16,24 +16,21 @@ import subprocess
 import sys
 import tempfile
 import threading
+import zipfile
 
 
 ABAQUS_CANDIDATES = ("abaqus", "abq2024", "abq2023", "abq2022")
 DEFAULT_EXTRACTOR_MODULE = "odb_extract.extractor"
-DEFAULT_FIELD_TEXT = "U UR V VR A AR"
 UI_TEXT = {
     "window_title": "Abaqus ODB 数据提取工具",
     "ready": "就绪",
     "running": "运行中",
     "odb_file": "ODB 文件",
     "npz_output": "NPZ 输出",
-    "metadata_output": "元数据 JSON",
     "points_file": "目标点坐标文件",
-    "point_fields": "目标点字段",
     "neighbors": "邻近点数量",
     "exact_tol": "精确命中容差",
     "abaqus_command": "Abaqus 命令",
-    "manual_fields": "手动字段",
     "instance_filter": "实例过滤",
     "node_label_filter": "节点编号",
     "frequency_min": "频率下限",
@@ -47,7 +44,6 @@ UI_TEXT = {
     "browse": "浏览",
     "select_odb_title": "选择 Abaqus ODB 文件",
     "select_npz_title": "选择 NPZ 输出文件",
-    "select_metadata_title": "选择元数据 JSON 输出文件",
     "select_points_title": "选择目标点坐标文件",
     "no_fields_found": "未找到场输出。",
     "found_fields": "已在 Step {step} 中找到 {count} 个场输出。",
@@ -78,6 +74,8 @@ UI_TEXT = {
     "exclusive_points_node_sets_title": "输入互斥",
     "exclusive_points_node_sets_message": "节点集和目标点坐标文件不能同时使用。",
     "starting_extraction": "开始 ODB 数据提取。",
+    "keep_full_cache": "保留并复用全模型已选场缓存",
+    "full_cache_hit": "复用全模型场缓存：{path}",
     "starting_point_export": "开始目标点数据导出。",
     "point_export_finished_log": "目标点数据导出完成：{path}",
     "extraction_failed_title": "提取失败",
@@ -88,7 +86,6 @@ UI_TEXT = {
     "extraction_exit_code_message": "Abaqus 退出代码为 {code}。请检查日志输出。",
     "select_all_fields": "全选",
     "clear_all_fields": "全不选",
-    "select_default_fields": "默认字段",
     "node_set_filter": "节点集",
     "node_set_hint": "请选择 ODB 文件以读取节点集。",
     "no_node_sets_found": "未找到节点集。",
@@ -121,11 +118,6 @@ def parse_args(argv=None):
     parser.add_argument("--frequency-min", type=float, help="Optional minimum frame frequency.")
     parser.add_argument("--frequency-max", type=float, help="Optional maximum frame frequency.")
     parser.add_argument("--points", help="Optional point CSV/XLSX with point_id,x,y,z columns.")
-    parser.add_argument(
-        "--point-fields",
-        nargs="+",
-        help="Optional node field names for point interpolation. Defaults to all node fields.",
-    )
     parser.add_argument(
         "--neighbors",
         type=int,
@@ -195,20 +187,6 @@ def parse_optional_float(value_text):
     return float(value_text)
 
 
-def choose_field_names(fields, mode, default_fields=None):
-    fields = sorted(fields)
-    if mode == "all":
-        return fields
-    if mode == "none":
-        return []
-    if mode == "default":
-        if default_fields is None:
-            default_fields = parse_field_text(DEFAULT_FIELD_TEXT) or []
-        defaults = set(default_fields)
-        return [field_name for field_name in fields if field_name in defaults]
-    raise ValueError("Unknown field selection mode: {}".format(mode))
-
-
 def _default_output_dir(odb_path):
     return os.path.join(os.path.dirname(os.path.abspath(odb_path)), "output")
 
@@ -220,6 +198,124 @@ def default_output_paths(odb_path, output_dir=None):
         os.path.join(output_dir, "{}_point_data.npz".format(base_name)),
         os.path.join(output_dir, "{}_point_metadata.json".format(base_name)),
     )
+
+
+def metadata_path_for_output(data_path):
+    suffix = "_data.npz"
+    if data_path.lower().endswith(suffix):
+        return data_path[: -len(suffix)] + "_metadata.json"
+    return os.path.splitext(data_path)[0] + "_metadata.json"
+
+
+def default_full_cache_paths(odb_path, output_path=None):
+    output_dir = (
+        os.path.dirname(os.path.abspath(output_path))
+        if output_path
+        else _default_output_dir(odb_path)
+    )
+    base_name = os.path.splitext(os.path.basename(odb_path))[0]
+    return (
+        os.path.join(output_dir, "{}_full_field_data.npz".format(base_name)),
+        os.path.join(output_dir, "{}_full_field_metadata.json".format(base_name)),
+    )
+
+
+def _normalized_cache_fields(fields):
+    selected = fields
+    if selected is None:
+        from odb_extract.extractor import DEFAULT_FIELDS
+
+        selected = DEFAULT_FIELDS
+    return sorted(selected)
+
+
+def _npz_shapes_match(data_path, expected_shapes):
+    from numpy.lib import format as np_format
+
+    if not isinstance(expected_shapes, dict):
+        return False
+    with zipfile.ZipFile(data_path) as archive:
+        members = archive.infolist()
+        keys = [member.filename[:-4] for member in members]
+        if (
+            any(member.is_dir() or not member.filename.endswith(".npy") for member in members)
+            or len(keys) != len(set(keys))
+            or set(keys) != set(expected_shapes)
+        ):
+            return False
+        for member, key in zip(members, keys):
+            expected_shape = expected_shapes[key]
+            if not isinstance(expected_shape, list):
+                return False
+            with archive.open(member) as stream:
+                version = np_format.read_magic(stream)
+                if version == (1, 0):
+                    shape = np_format.read_array_header_1_0(stream)[0]
+                elif version == (2, 0):
+                    shape = np_format.read_array_header_2_0(stream)[0]
+                else:
+                    return False
+            if tuple(expected_shape) != shape:
+                return False
+    return True
+
+
+def _full_cache_is_valid(
+    odb_path,
+    data_path,
+    metadata_path,
+    step_name,
+    fields,
+    instances,
+    node_labels,
+    frequency_min,
+    frequency_max,
+    node_sets,
+):
+    try:
+        if not os.path.isfile(data_path) or not os.path.isfile(metadata_path):
+            return False
+        odb_mtime = os.path.getmtime(odb_path)
+        if min(os.path.getmtime(data_path), os.path.getmtime(metadata_path)) < odb_mtime:
+            return False
+        with open(metadata_path, "r", encoding="utf-8") as stream:
+            metadata = json.load(stream)
+        if not isinstance(metadata, dict):
+            return False
+        source_odb = metadata.get("source_odb")
+        if not isinstance(source_odb, str):
+            return False
+        if os.path.normcase(os.path.abspath(source_odb)) != os.path.normcase(
+            os.path.abspath(odb_path)
+        ):
+            return False
+        actual_step = metadata.get("step")
+        if not isinstance(actual_step, str) or not actual_step:
+            return False
+        command_options = metadata.get("command_options")
+        if not isinstance(command_options, dict):
+            return False
+        if command_options.get("step") != step_name:
+            return False
+        if step_name and actual_step != step_name:
+            return False
+        cached_fields = metadata.get("fields")
+        if not isinstance(cached_fields, list):
+            return False
+        if sorted(cached_fields) != _normalized_cache_fields(fields):
+            return False
+        expected_filters = {
+            "instances": list(instances or []),
+            "node_labels": list(node_labels or []),
+            "node_sets": list(node_sets or []),
+            "frequency_min": frequency_min,
+            "frequency_max": frequency_max,
+        }
+        if metadata.get("filters") != expected_filters:
+            return False
+        return _npz_shapes_match(data_path, metadata.get("array_shapes"))
+    except Exception:
+        return False
 
 
 def find_abaqus_command(explicit_command=None, env=None, which=None):
@@ -458,12 +554,6 @@ def run_command(command, log_callback=None):
     return code if code != 0 or not saw_error else 1
 
 
-def run_command_silent(command):
-    with _external_program_dll_context():
-        completed = subprocess.run(command)
-    return completed.returncode
-
-
 def run_command_capture(command):
     with _external_program_dll_context():
         completed = subprocess.run(
@@ -602,13 +692,13 @@ def run_workflow(
     frequency_max=None,
     node_sets=None,
     points_path=None,
-    point_fields=None,
     neighbors=4,
     exact_tol=1.0e-9,
     extraction_runner=None,
     point_runner=None,
     verbose=True,
     log_callback=None,
+    keep_full_cache=False,
 ):
     if node_sets and points_path:
         raise ValueError("--node-sets and --points cannot be used together.")
@@ -616,13 +706,31 @@ def run_workflow(
     uses_default_point_runner = point_runner is None
     temp_output_path = None
     temp_metadata_path = None
+    cache_is_valid = False
     if points_path:
         default_npz, default_metadata = default_output_paths(odb_path)
         output_path = output_path or default_npz
         metadata_path = metadata_path or default_metadata
-        temp_output_path, temp_metadata_path = _temporary_output_pair(output_path)
-        extraction_output_path = temp_output_path
-        extraction_metadata_path = temp_metadata_path
+        if keep_full_cache:
+            extraction_output_path, extraction_metadata_path = default_full_cache_paths(
+                odb_path, output_path
+            )
+            cache_is_valid = _full_cache_is_valid(
+                odb_path,
+                extraction_output_path,
+                extraction_metadata_path,
+                step_name,
+                fields,
+                instances,
+                node_labels,
+                frequency_min,
+                frequency_max,
+                node_sets,
+            )
+        else:
+            temp_output_path, temp_metadata_path = _temporary_output_pair(output_path)
+            extraction_output_path = temp_output_path
+            extraction_metadata_path = temp_metadata_path
     else:
         extraction_output_path = output_path
         extraction_metadata_path = metadata_path
@@ -633,32 +741,40 @@ def run_workflow(
         extraction_output_path = output_path
         extraction_metadata_path = metadata_path
 
-    if log_callback:
-        log_callback(UI_TEXT["starting_extraction"])
-
     extraction_runner = run_extraction if extraction_runner is None else extraction_runner
     try:
-        code = extraction_runner(
-            abaqus_command=abaqus_command,
-            odb_path=odb_path,
-            extractor_module=extractor_module or default_extractor_module(),
-            output_path=extraction_output_path,
-            metadata_path=extraction_metadata_path,
-            step_name=step_name,
-            fields=fields,
-            instances=instances,
-            node_labels=node_labels,
-            frequency_min=frequency_min,
-            frequency_max=frequency_max,
-            node_sets=node_sets,
-            verbose=verbose,
-            log_callback=log_callback,
-        )
+        if cache_is_valid:
+            code = 0
+            if log_callback:
+                log_callback(
+                    UI_TEXT["full_cache_hit"].format(path=extraction_output_path)
+                )
+        else:
+            if log_callback:
+                log_callback(UI_TEXT["starting_extraction"])
+            code = extraction_runner(
+                abaqus_command=abaqus_command,
+                odb_path=odb_path,
+                extractor_module=extractor_module or default_extractor_module(),
+                output_path=extraction_output_path,
+                metadata_path=extraction_metadata_path,
+                step_name=step_name,
+                fields=fields,
+                instances=instances,
+                node_labels=node_labels,
+                frequency_min=frequency_min,
+                frequency_max=frequency_max,
+                node_sets=node_sets,
+                verbose=verbose,
+                log_callback=log_callback,
+            )
         if code != 0 or not points_path:
             return code
 
         if uses_default_point_runner:
-            missing_paths = _missing_file_paths([temp_output_path, temp_metadata_path])
+            missing_paths = _missing_file_paths(
+                [extraction_output_path, extraction_metadata_path]
+            )
             if missing_paths:
                 raise RuntimeError(
                     "Abaqus 返回成功，但提取阶段未生成目标点导出需要的文件：{}。"
@@ -672,12 +788,12 @@ def run_workflow(
 
         point_runner = _default_point_runner if uses_default_point_runner else point_runner
         point_runner(
-            data_path=temp_output_path,
-            metadata_path=temp_metadata_path,
+            data_path=extraction_output_path,
+            metadata_path=extraction_metadata_path,
             points_path=points_path,
             output_path=output_path,
             metadata_output_path=metadata_path,
-            fields=point_fields,
+            fields=None,
             neighbors=neighbors,
             exact_tol=exact_tol,
         )
@@ -729,7 +845,6 @@ def run_cli(argv=None):
         frequency_max=args.frequency_max,
         node_sets=args.node_sets,
         points_path=args.points,
-        point_fields=args.point_fields,
         neighbors=args.neighbors,
         exact_tol=args.exact_tol,
         verbose=sys.stdout is not None,
@@ -748,18 +863,16 @@ class ExtractOdbApp(object):
 
         self.odb_var = tk.StringVar()
         self.output_var = tk.StringVar()
-        self.metadata_var = tk.StringVar()
         self.points_var = tk.StringVar()
-        self.point_fields_var = tk.StringVar()
         self.neighbors_var = tk.StringVar(value="4")
         self.exact_tol_var = tk.StringVar(value="1e-9")
         self.step_var = tk.StringVar()
-        self.fields_var = tk.StringVar(value=DEFAULT_FIELD_TEXT)
         self.instances_var = tk.StringVar()
         self.node_labels_var = tk.StringVar()
         self.frequency_min_var = tk.StringVar()
         self.frequency_max_var = tk.StringVar()
         self.abaqus_var = tk.StringVar(value=find_abaqus_command() or "")
+        self.keep_full_cache_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value=UI_TEXT["ready"])
         self._running = False
         self.field_vars = {}
@@ -798,9 +911,6 @@ class ExtractOdbApp(object):
 
         self._add_path_row(frame, 0, UI_TEXT["odb_file"], self.odb_var, self.choose_odb)
         self._add_path_row(frame, 1, UI_TEXT["npz_output"], self.output_var, self.choose_output)
-        self._add_path_row(
-            frame, 2, UI_TEXT["metadata_output"], self.metadata_var, self.choose_metadata
-        )
         self._add_path_row(frame, 3, UI_TEXT["points_file"], self.points_var, self.choose_points)
         self._add_path_row(frame, 4, UI_TEXT["abaqus_command"], self.abaqus_var, None)
         ttk.Label(frame, text="Step").grid(row=7, column=0, sticky="w", pady=4)
@@ -808,14 +918,12 @@ class ExtractOdbApp(object):
             row=7, column=1, columnspan=2, sticky="ew", pady=4
         )
 
-        ttk.Label(frame, text=UI_TEXT["manual_fields"]).grid(row=8, column=0, sticky="w", pady=4)
-        ttk.Entry(frame, textvariable=self.fields_var).grid(
-            row=8, column=1, sticky="ew", pady=4, padx=(0, 6)
-        )
         self.refresh_button = ttk.Button(
             frame, text=UI_TEXT["refresh_fields"], command=self.refresh_fields
         )
-        self.refresh_button.grid(row=8, column=2, sticky="ew", pady=4)
+        self.refresh_button.grid(
+            row=8, column=0, columnspan=3, sticky="ew", pady=4
+        )
 
         ttk.Label(frame, text=UI_TEXT["instance_filter"]).grid(row=9, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.instances_var).grid(
@@ -844,11 +952,6 @@ class ExtractOdbApp(object):
         )
         ttk.Entry(frequency_frame, textvariable=self.frequency_max_var).grid(
             row=0, column=2, sticky="ew"
-        )
-
-        ttk.Label(frame, text=UI_TEXT["point_fields"]).grid(row=14, column=0, sticky="w", pady=4)
-        ttk.Entry(frame, textvariable=self.point_fields_var).grid(
-            row=14, column=1, columnspan=2, sticky="ew", pady=4
         )
 
         ttk.Label(frame, text=UI_TEXT["neighbors"]).grid(row=15, column=0, sticky="w", pady=4)
@@ -884,11 +987,6 @@ class ExtractOdbApp(object):
                 text=UI_TEXT["clear_all_fields"],
                 command=lambda: self._set_field_selection("none"),
             ),
-            ttk.Button(
-                field_toolbar,
-                text=UI_TEXT["select_default_fields"],
-                command=lambda: self._set_field_selection("default"),
-            ),
         ]
         for button in self.field_selection_buttons:
             button.pack(side="left", padx=(0, 6))
@@ -920,6 +1018,12 @@ class ExtractOdbApp(object):
             text=UI_TEXT["field_hint"],
         )
         self.field_hint.grid(row=0, column=0, sticky="w", padx=8, pady=8)
+
+        ttk.Checkbutton(
+            frame,
+            text=UI_TEXT["keep_full_cache"],
+            variable=self.keep_full_cache_var,
+        ).grid(row=17, column=0, columnspan=3, sticky="w", pady=(2, 4))
 
         button_bar = ttk.Frame(frame)
         button_bar.grid(row=18, column=0, columnspan=3, sticky="ew", pady=(8, 6))
@@ -1039,10 +1143,9 @@ class ExtractOdbApp(object):
         if not path:
             return
         self.odb_var.set(path)
-        if not self.output_var.get().strip() and not self.metadata_var.get().strip():
-            output_path, metadata_path = default_output_paths(path)
+        if not self.output_var.get().strip():
+            output_path, _metadata_path = default_output_paths(path)
             self.output_var.set(output_path)
-            self.metadata_var.set(metadata_path)
         self.refresh_fields()
         self.refresh_node_sets()
 
@@ -1061,22 +1164,6 @@ class ExtractOdbApp(object):
         )
         if path:
             self.output_var.set(path)
-
-    def choose_metadata(self):
-        from tkinter import filedialog
-
-        initial = self.metadata_var.get().strip() or default_output_paths(
-            self.odb_var.get().strip() or "odb"
-        )[1]
-        path = filedialog.asksaveasfilename(
-            title=UI_TEXT["select_metadata_title"],
-            defaultextension=".json",
-            initialfile=os.path.basename(initial),
-            initialdir=os.path.dirname(initial) or os.getcwd(),
-            filetypes=(("JSON", "*.json"), ("All files", "*.*")),
-        )
-        if path:
-            self.metadata_var.set(path)
 
     def choose_points(self):
         from tkinter import filedialog
@@ -1188,18 +1275,11 @@ class ExtractOdbApp(object):
         self.field_vars = {}
 
     def _set_field_selection(self, mode):
-        selected = set(choose_field_names(self.field_vars.keys(), mode))
-        for field_name, variable in self.field_vars.items():
-            variable.set(field_name in selected)
-        self._sync_fields_from_checks()
-
-    def _sync_fields_from_checks(self):
-        selected = [
-            field_name
-            for field_name, variable in sorted(self.field_vars.items())
-            if variable.get()
-        ]
-        self.fields_var.set(" ".join(selected))
+        if mode not in ("all", "none"):
+            raise ValueError("Unknown field selection mode: {}".format(mode))
+        selected = mode == "all"
+        for variable in self.field_vars.values():
+            variable.set(selected)
 
     def _show_discovered_fields(self, metadata):
         tk = self.tk
@@ -1211,27 +1291,17 @@ class ExtractOdbApp(object):
             ttk.Label(self.field_checks_frame, text=UI_TEXT["no_fields_found"]).grid(
                 row=0, column=0, sticky="w", padx=8, pady=8
             )
-            self.fields_var.set("")
             return
 
-        default_fields = set(parse_field_text(DEFAULT_FIELD_TEXT) or [])
-        checked_any = False
         for index, field_name in enumerate(fields):
-            checked = field_name in default_fields
-            checked_any = checked_any or checked
-            variable = tk.BooleanVar(value=checked)
+            variable = tk.BooleanVar(value=False)
             self.field_vars[field_name] = variable
             ttk.Checkbutton(
                 self.field_checks_frame,
                 text=field_name,
                 variable=variable,
-                command=self._sync_fields_from_checks,
             ).grid(row=index // 6, column=index % 6, sticky="w", padx=8, pady=4)
 
-        if not checked_any:
-            for variable in self.field_vars.values():
-                variable.set(True)
-        self._sync_fields_from_checks()
         self.field_canvas.yview_moveto(0)
         self.log(UI_TEXT["found_fields"].format(step=metadata.get("step", ""), count=len(fields)))
 
@@ -1392,13 +1462,11 @@ class ExtractOdbApp(object):
         merge_gui.MergePointDataWindow(self.root)
 
     def _selected_fields(self):
-        if self.field_vars:
-            return [
-                field_name
-                for field_name, variable in sorted(self.field_vars.items())
-                if variable.get()
-            ]
-        return parse_field_text(self.fields_var.get())
+        return [
+            field_name
+            for field_name, variable in sorted(self.field_vars.items())
+            if variable.get()
+        ]
 
     def _validate_inputs(self):
         from tkinter import messagebox
@@ -1417,7 +1485,7 @@ class ExtractOdbApp(object):
             return None
 
         fields = self._selected_fields()
-        if self.field_vars and not fields:
+        if not fields:
             messagebox.showerror(
                 UI_TEXT["no_fields_selected_title"],
                 UI_TEXT["no_fields_selected_message"],
@@ -1461,10 +1529,9 @@ class ExtractOdbApp(object):
         node_sets = parse_node_set_text(self.node_sets_var.get())
         instances = parse_field_text(self.instances_var.get())
         output_path = self.output_var.get().strip() or None
-        metadata_path = self.metadata_var.get().strip() or None
+        metadata_path = metadata_path_for_output(output_path) if output_path else None
         step_name = self.step_var.get().strip() or None
         points_path = self.points_var.get().strip() or None
-        point_fields = parse_field_text(self.point_fields_var.get())
         if node_sets and points_path:
             messagebox.showerror(
                 UI_TEXT["exclusive_points_node_sets_title"],
@@ -1485,9 +1552,9 @@ class ExtractOdbApp(object):
             "frequency_max": frequency_max,
             "node_sets": node_sets,
             "points_path": points_path,
-            "point_fields": point_fields,
             "neighbors": neighbors,
             "exact_tol": exact_tol if exact_tol is not None else 1.0e-9,
+            "keep_full_cache": bool(self.keep_full_cache_var.get()),
         }
 
     def run(self):

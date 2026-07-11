@@ -80,6 +80,37 @@ class FakeFieldOutput(object):
         return FakeSubset(self._values)
 
 
+class FakeBulkBlock(object):
+    def __init__(
+        self,
+        instance_name,
+        node_labels,
+        data,
+        conjugate_data=None,
+        component_labels=None,
+        position="NODAL",
+    ):
+        self.instance = type("InstanceRef", (), {"name": instance_name})()
+        self.nodeLabels = node_labels
+        self.data = data
+        self.position = position
+        if conjugate_data is not None:
+            self.conjugateData = conjugate_data
+        if component_labels is not None:
+            self.componentLabels = component_labels
+
+
+class BulkOnlyFieldOutput(object):
+    def __init__(self, blocks, component_labels=None):
+        self.bulkDataBlocks = blocks
+        if component_labels is not None:
+            self.componentLabels = component_labels
+
+    @property
+    def values(self):
+        raise AssertionError("field.values must not be read for a bulk node field")
+
+
 class StrictFakeFieldOutput(object):
     def __init__(self, values):
         self.values = values
@@ -143,18 +174,22 @@ class ExtractorTests(unittest.TestCase):
         self.assertNotIn('with open(metadata_path, "w", encoding=', source)
         self.assertNotIn("timespec=", source)
 
-    def test_full_array_does_not_require_numpy_full(self):
-        class OldNumpy(object):
-            nan = np.nan
+    def test_removed_legacy_helpers_are_absent(self):
+        from odb_extract import interpolate_points, launcher
 
-            @staticmethod
-            def empty(shape, dtype=float):
-                return np.empty(shape, dtype=dtype)
-
-        array = extractor._full_array(OldNumpy, (2, 2), OldNumpy.nan, dtype=float)
-
-        self.assertEqual(array.shape, (2, 2))
-        self.assertTrue(np.isnan(array).all())
+        extractor_names = (
+            "_full_array",
+            "_component_count_from_step",
+            "_component_count_for_field",
+            "_component_labels_for_field",
+            "_field_location_from_step",
+            "_collect_field_point_keys",
+            "_filter_frames_by_frequency",
+        )
+        for name in extractor_names:
+            self.assertFalse(hasattr(extractor, name), name)
+        self.assertFalse(hasattr(launcher, "run_command_silent"))
+        self.assertFalse(hasattr(interpolate_points, "read_query_points"))
 
     def test_cleanup_memmap_files_closes_mapping_before_delete(self):
         array, path = extractor._create_memmap_array(np, (2, 2))
@@ -372,6 +407,119 @@ class ExtractorTests(unittest.TestCase):
             metadata["field_outputs"]["U"]["array_layout"],
             ["frame", "node", "component"],
         )
+
+    def test_extract_field_arrays_uses_bulk_blocks_for_all_selected_node_fields(self):
+        nodes = [
+            extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0)),
+            extractor.NodeRef("PART-2-1", 2, (1.0, 0.0, 0.0)),
+        ]
+        step = FakeStep(
+            [
+                FakeFrame(
+                    5.0,
+                    {
+                        "POR": BulkOnlyFieldOutput(
+                            [
+                                FakeBulkBlock("PART-1-1", [1], [[12.5]], [[0.25]], ["POR"]),
+                                FakeBulkBlock("PART-2-1", [2], [[25.0]], component_labels=["POR"]),
+                            ],
+                            component_labels=("POR",),
+                        ),
+                        "U": BulkOnlyFieldOutput(
+                            [
+                                FakeBulkBlock(
+                                    "PART-1-1", [1], [[1.0, 2.0, 3.0]], [[0.1, 0.2, 0.3]], ["U1", "U2", "U3"]
+                                ),
+                                FakeBulkBlock(
+                                    "PART-2-1", [2], [[4.0, 5.0, 6.0]], [[0.4, 0.5, 0.6]], ["U1", "U2", "U3"]
+                                ),
+                            ],
+                            component_labels=("U1", "U2", "U3"),
+                        ),
+                        "A": object(),
+                    },
+                )
+            ]
+        )
+
+        arrays, metadata = extractor.extract_field_arrays(step, nodes, ["POR", "U"])
+
+        np.testing.assert_allclose(arrays["POR_real"][0, :, 0], [12.5, 25.0])
+        np.testing.assert_allclose(arrays["POR_imag"][0, :, 0], [0.25, 0.0])
+        np.testing.assert_allclose(arrays["U_real"][0], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        np.testing.assert_allclose(arrays["U_imag"][0], [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+        self.assertEqual(sorted(metadata["field_outputs"]), ["POR", "U"])
+        self.assertNotIn("A_real", arrays)
+
+    def test_extract_field_arrays_falls_back_for_element_nodal_bulk_blocks(self):
+        nodes = [extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0))]
+        field = FakeFieldOutput(
+            [FakeValue("PART-1-1", 1, 12.5, 0.25)],
+            component_labels=("POR",),
+        )
+        field.bulkDataBlocks = [
+            FakeBulkBlock(
+                "PART-1-1",
+                [1],
+                [[99.0]],
+                [[9.9]],
+                ["POR"],
+                position="ELEMENT_NODAL",
+            )
+        ]
+        step = FakeStep([FakeFrame(5.0, {"POR": field})])
+
+        arrays, metadata = extractor.extract_field_arrays(step, nodes, ["POR"])
+
+        self.assertEqual(arrays["POR_real"][0, 0, 0], 12.5)
+        self.assertEqual(arrays["POR_imag"][0, 0, 0], 0.25)
+        self.assertEqual(metadata["field_outputs"]["POR"]["location"], "NODE")
+
+    def test_extract_field_arrays_falls_back_when_bulk_real_width_is_inconsistent(self):
+        nodes = [extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0))]
+        field = FakeFieldOutput(
+            [FakeValue("PART-1-1", 1, (4.0, 5.0, 6.0), (0.4, 0.5, 0.6))],
+            component_labels=("U1", "U2", "U3"),
+        )
+        field.bulkDataBlocks = [
+            FakeBulkBlock(
+                "PART-1-1",
+                [1],
+                [[90.0, 91.0]],
+                [[9.0, 9.1]],
+                ["U1", "U2", "U3"],
+            )
+        ]
+        step = FakeStep([FakeFrame(5.0, {"U": field})])
+
+        arrays, metadata = extractor.extract_field_arrays(step, nodes, ["U"])
+
+        np.testing.assert_allclose(arrays["U_real"][0, 0], [4.0, 5.0, 6.0])
+        np.testing.assert_allclose(arrays["U_imag"][0, 0], [0.4, 0.5, 0.6])
+        self.assertEqual(metadata["field_outputs"]["U"]["components"], ["U1", "U2", "U3"])
+
+    def test_extract_field_arrays_falls_back_when_bulk_conjugate_width_is_inconsistent(self):
+        nodes = [extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0))]
+        field = FakeFieldOutput(
+            [FakeValue("PART-1-1", 1, (7.0, 8.0, 9.0), (0.7, 0.8, 0.9))],
+            component_labels=("U1", "U2", "U3"),
+        )
+        field.bulkDataBlocks = [
+            FakeBulkBlock(
+                "PART-1-1",
+                [1],
+                [[70.0, 71.0, 72.0]],
+                [[9.7, 9.8]],
+                ["U1", "U2", "U3"],
+            )
+        ]
+        step = FakeStep([FakeFrame(5.0, {"U": field})])
+
+        arrays, metadata = extractor.extract_field_arrays(step, nodes, ["U"])
+
+        np.testing.assert_allclose(arrays["U_real"][0, 0], [7.0, 8.0, 9.0])
+        np.testing.assert_allclose(arrays["U_imag"][0, 0], [0.7, 0.8, 0.9])
+        self.assertEqual(metadata["field_outputs"]["U"]["components"], ["U1", "U2", "U3"])
 
     def test_extract_field_arrays_can_filter_frequency_range(self):
         nodes = [extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0))]

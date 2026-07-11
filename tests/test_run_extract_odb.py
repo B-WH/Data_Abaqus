@@ -1,7 +1,11 @@
-import os
+import contextlib
 import inspect
+import json
+import os
 import unittest
 from unittest import mock
+
+import numpy as np
 
 from odb_extract import launcher, merge_gui
 
@@ -13,6 +17,31 @@ class LauncherTests(unittest.TestCase):
 
         def get(self):
             return self.value
+
+    def _write_full_cache_metadata(self, path, odb_path, array_shapes):
+        metadata = {
+            "source_odb": os.path.abspath(odb_path),
+            "step": "Step-1",
+            "command_options": {"step": None},
+            "fields": ["POR"],
+            "array_shapes": array_shapes,
+            "filters": {
+                "instances": [],
+                "node_labels": [],
+                "node_sets": [],
+                "frequency_min": None,
+                "frequency_max": None,
+            },
+        }
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump(metadata, stream)
+
+    def _cache_validator_test_dir(self, name):
+        path = os.path.abspath(
+            os.path.join("work", "test-output", "cache-validator-tests", name)
+        )
+        os.makedirs(path, exist_ok=True)
+        return path
 
     def test_build_widgets_uses_scrollable_main_canvas(self):
         build_source = inspect.getsource(launcher.ExtractOdbApp._build_widgets)
@@ -33,6 +62,39 @@ class LauncherTests(unittest.TestCase):
 
         self.assertIn('UI_TEXT["merge_results"]', build_source)
         self.assertIn("command=self.open_merge_window", build_source)
+
+    def test_build_widgets_has_selected_field_cache_checkbox(self):
+        build_source = inspect.getsource(launcher.ExtractOdbApp._build_widgets)
+
+        self.assertIn('UI_TEXT["keep_full_cache"]', build_source)
+        self.assertIn("self.keep_full_cache_var", build_source)
+
+    def test_build_widgets_does_not_expose_metadata_path(self):
+        build_source = inspect.getsource(launcher.ExtractOdbApp._build_widgets)
+
+        self.assertNotIn('UI_TEXT["metadata_output"]', build_source)
+        self.assertNotIn("self.choose_metadata", build_source)
+
+    def test_build_widgets_only_exposes_checkbox_field_selection(self):
+        build_source = inspect.getsource(launcher.ExtractOdbApp._build_widgets)
+
+        self.assertNotIn('UI_TEXT["manual_fields"]', build_source)
+        self.assertNotIn('UI_TEXT["point_fields"]', build_source)
+        self.assertNotIn('UI_TEXT["select_default_fields"]', build_source)
+
+    def test_discovered_fields_start_unchecked(self):
+        source = inspect.getsource(launcher.ExtractOdbApp._show_discovered_fields)
+
+        self.assertIn("BooleanVar(value=False)", source)
+        self.assertNotIn("checked_any", source)
+        self.assertNotIn("DEFAULT_FIELD_TEXT", source)
+
+    def test_selected_fields_ignores_legacy_manual_text(self):
+        app = object.__new__(launcher.ExtractOdbApp)
+        app.field_vars = {}
+        app.fields_var = self.FakeVar("POR")
+
+        self.assertEqual(app._selected_fields(), [])
 
     def test_build_widgets_does_not_expose_csv_outputs(self):
         build_source = inspect.getsource(launcher.ExtractOdbApp._build_widgets)
@@ -235,32 +297,6 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(messages, ["startup", "ERROR: extraction failed"])
 
-    def test_run_command_silent_temporarily_restores_system_dll_search(self):
-        calls = []
-        kernel32 = mock.Mock()
-        kernel32.SetDllDirectoryW.side_effect = lambda path: calls.append(path)
-
-        def fake_run(command):
-            calls.append(tuple(command))
-            return mock.Mock(returncode=0)
-
-        with mock.patch.object(launcher.sys, "platform", "win32"):
-            with mock.patch.object(
-                launcher.sys, "_MEIPASS", r"C:\temp\_MEI", create=True
-            ):
-                with mock.patch.object(
-                    launcher.ctypes,
-                    "windll",
-                    mock.Mock(kernel32=kernel32),
-                ):
-                    with mock.patch.object(
-                        launcher.subprocess, "run", side_effect=fake_run
-                    ):
-                        code = launcher.run_command_silent(["abaqus", "python"])
-
-        self.assertEqual(code, 0)
-        self.assertEqual(calls, [None, ("abaqus", "python"), r"C:\temp\_MEI"])
-
     def test_inspect_odb_structure_calls_runner_and_returns_metadata(self):
         calls = []
 
@@ -381,9 +417,6 @@ class LauncherTests(unittest.TestCase):
                 "data/test1.odb",
                 "--points",
                 "points.xlsx",
-                "--point-fields",
-                "U",
-                "V",
                 "--neighbors",
                 "6",
                 "--exact-tol",
@@ -392,7 +425,6 @@ class LauncherTests(unittest.TestCase):
         )
 
         self.assertEqual(args.points, "points.xlsx")
-        self.assertEqual(args.point_fields, ["U", "V"])
         self.assertEqual(args.neighbors, 6)
         self.assertEqual(args.exact_tol, 1.0e-8)
 
@@ -429,31 +461,10 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(launcher.UI_TEXT["refresh_fields"], "读取场输出")
         self.assertEqual(launcher.UI_TEXT["select_all_fields"], "全选")
         self.assertEqual(launcher.UI_TEXT["clear_all_fields"], "全不选")
-        self.assertEqual(launcher.UI_TEXT["select_default_fields"], "默认字段")
-
-    def test_choose_field_names_supports_all_none_and_default_modes(self):
-        fields = ["A", "LE", "S", "U"]
-
         self.assertEqual(
-            launcher.choose_field_names(fields, "all"),
-            ["A", "LE", "S", "U"],
+            launcher.UI_TEXT["keep_full_cache"],
+            "保留并复用全模型已选场缓存",
         )
-        self.assertEqual(launcher.choose_field_names(fields, "none"), [])
-        self.assertEqual(
-            launcher.choose_field_names(fields, "default"),
-            ["A", "U"],
-        )
-
-    def test_choose_field_names_handles_empty_default_field_text(self):
-        with mock.patch.object(launcher, "DEFAULT_FIELD_TEXT", "  ,  "):
-            self.assertEqual(
-                launcher.choose_field_names(["A", "U"], "default"),
-                [],
-            )
-
-    def test_choose_field_names_rejects_unknown_mode(self):
-        with self.assertRaises(ValueError):
-            launcher.choose_field_names(["U"], "invalid")
 
     def test_default_output_paths_use_odb_base_name(self):
         output_path, metadata_path = launcher.default_output_paths(
@@ -474,6 +485,279 @@ class LauncherTests(unittest.TestCase):
             metadata_path, r"D:\work\data\output\test1_point_metadata.json"
         )
 
+    def test_metadata_path_for_output_pairs_data_and_metadata_names(self):
+        self.assertEqual(
+            launcher.metadata_path_for_output(
+                r"D:\results\surface_point_data.npz"
+            ),
+            r"D:\results\surface_point_metadata.json",
+        )
+        self.assertEqual(
+            launcher.metadata_path_for_output(r"D:\results\surface.npz"),
+            r"D:\results\surface_metadata.json",
+        )
+
+    def test_launcher_rejects_removed_point_fields_option(self):
+        with self.assertRaises(SystemExit):
+            launcher.parse_args(
+                [
+                    "--odb",
+                    "model.odb",
+                    "--points",
+                    "points.xlsx",
+                    "--point-fields",
+                    "POR",
+                ]
+            )
+
+    def test_run_workflow_has_no_point_fields_parameter(self):
+        self.assertNotIn(
+            "point_fields",
+            inspect.signature(launcher.run_workflow).parameters,
+        )
+
+    def test_default_full_cache_paths_are_next_to_point_output(self):
+        data_path, metadata_path = launcher.default_full_cache_paths(
+            r"D:\work\model.odb",
+            r"D:\results\surface_points.npz",
+        )
+
+        self.assertEqual(data_path, r"D:\results\model_full_field_data.npz")
+        self.assertEqual(metadata_path, r"D:\results\model_full_field_metadata.json")
+
+    def test_full_cache_is_invalid_when_selected_fields_change(self):
+        metadata = {
+            "source_odb": os.path.abspath("model.odb"),
+            "step": "Step-1",
+            "command_options": {"step": "Step-1"},
+            "fields": ["POR"],
+            "filters": {
+                "instances": [],
+                "node_labels": [],
+                "node_sets": [],
+                "frequency_min": None,
+                "frequency_max": None,
+            },
+        }
+        with mock.patch.object(launcher.os.path, "isfile", return_value=True), \
+             mock.patch.object(
+                 launcher.os.path, "getmtime", side_effect=[1.0, 2.0, 2.0]
+             ), \
+             mock.patch(
+                 "builtins.open", mock.mock_open(read_data=json.dumps(metadata))
+             ):
+            valid = launcher._full_cache_is_valid(
+                "model.odb",
+                "cache.npz",
+                "cache.json",
+                "Step-1",
+                ["POR", "U"],
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        self.assertFalse(valid)
+
+    def test_full_cache_is_valid_for_default_step_selector(self):
+        metadata = {
+            "source_odb": os.path.abspath("model.odb"),
+            "step": "Step-1",
+            "command_options": {"step": None},
+            "fields": ["POR", "U"],
+            "array_shapes": {"POR_real": [1, 2, 1]},
+            "filters": {
+                "instances": [],
+                "node_labels": [],
+                "node_sets": [],
+                "frequency_min": None,
+                "frequency_max": None,
+            },
+        }
+        with mock.patch.object(launcher.os.path, "isfile", return_value=True), \
+             mock.patch.object(
+                 launcher.os.path, "getmtime", side_effect=[1.0, 2.0, 2.0]
+             ), \
+             mock.patch(
+                 "builtins.open", mock.mock_open(read_data=json.dumps(metadata))
+             ), \
+             mock.patch.object(launcher, "_npz_shapes_match", return_value=True):
+            valid = launcher._full_cache_is_valid(
+                "model.odb",
+                "cache.npz",
+                "cache.json",
+                None,
+                ["POR", "U"],
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        self.assertTrue(valid)
+
+    def test_full_cache_is_invalid_without_raising_for_mixed_field_types(self):
+        metadata = {
+            "source_odb": os.path.abspath("model.odb"),
+            "step": "Step-1",
+            "command_options": {"step": None},
+            "fields": ["POR", 1],
+            "filters": {
+                "instances": [],
+                "node_labels": [],
+                "node_sets": [],
+                "frequency_min": None,
+                "frequency_max": None,
+            },
+        }
+        with mock.patch.object(launcher.os.path, "isfile", return_value=True), \
+             mock.patch.object(
+                 launcher.os.path, "getmtime", side_effect=[1.0, 2.0, 2.0]
+             ), \
+             mock.patch(
+                 "builtins.open", mock.mock_open(read_data=json.dumps(metadata))
+             ):
+            valid = launcher._full_cache_is_valid(
+                "model.odb",
+                "cache.npz",
+                "cache.json",
+                None,
+                ["POR", "U"],
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        self.assertFalse(valid)
+
+    def test_full_cache_is_invalid_when_step_selector_changes(self):
+        metadata = {
+            "source_odb": os.path.abspath("model.odb"),
+            "step": "Step-1",
+            "command_options": {"step": "Step-1"},
+            "fields": ["POR", "U"],
+            "filters": {
+                "instances": [],
+                "node_labels": [],
+                "node_sets": [],
+                "frequency_min": None,
+                "frequency_max": None,
+            },
+        }
+        with mock.patch.object(launcher.os.path, "isfile", return_value=True), \
+             mock.patch.object(
+                 launcher.os.path, "getmtime", side_effect=[1.0, 2.0, 2.0]
+             ), \
+             mock.patch(
+                 "builtins.open", mock.mock_open(read_data=json.dumps(metadata))
+             ):
+            valid = launcher._full_cache_is_valid(
+                "model.odb",
+                "cache.npz",
+                "cache.json",
+                None,
+                ["POR", "U"],
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        self.assertFalse(valid)
+
+    def test_full_cache_is_invalid_for_non_npz_data(self):
+        with contextlib.nullcontext(
+            self._cache_validator_test_dir("non-npz")
+        ) as temp_dir:
+            odb_path = os.path.join(temp_dir, "model.odb")
+            data_path = os.path.join(temp_dir, "cache.npz")
+            metadata_path = os.path.join(temp_dir, "cache.json")
+            open(odb_path, "wb").close()
+            with open(data_path, "wb") as stream:
+                stream.write(b"not an npz")
+            self._write_full_cache_metadata(
+                metadata_path, odb_path, {"POR_real": [1, 2, 1]}
+            )
+
+            valid = launcher._full_cache_is_valid(
+                odb_path,
+                data_path,
+                metadata_path,
+                None,
+                ["POR"],
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        self.assertFalse(valid)
+
+    def test_full_cache_is_invalid_when_npz_key_is_missing(self):
+        with contextlib.nullcontext(
+            self._cache_validator_test_dir("missing-key")
+        ) as temp_dir:
+            odb_path = os.path.join(temp_dir, "model.odb")
+            data_path = os.path.join(temp_dir, "cache.npz")
+            metadata_path = os.path.join(temp_dir, "cache.json")
+            open(odb_path, "wb").close()
+            np.savez_compressed(data_path, POR_real=np.zeros((1, 2, 1)))
+            self._write_full_cache_metadata(
+                metadata_path,
+                odb_path,
+                {"POR_real": [1, 2, 1], "POR_imag": [1, 2, 1]},
+            )
+
+            valid = launcher._full_cache_is_valid(
+                odb_path,
+                data_path,
+                metadata_path,
+                None,
+                ["POR"],
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        self.assertFalse(valid)
+
+    def test_full_cache_is_invalid_when_npz_shape_differs_from_metadata(self):
+        with contextlib.nullcontext(
+            self._cache_validator_test_dir("shape-mismatch")
+        ) as temp_dir:
+            odb_path = os.path.join(temp_dir, "model.odb")
+            data_path = os.path.join(temp_dir, "cache.npz")
+            metadata_path = os.path.join(temp_dir, "cache.json")
+            open(odb_path, "wb").close()
+            np.savez_compressed(data_path, POR_real=np.zeros((1, 2, 1)))
+            self._write_full_cache_metadata(
+                metadata_path, odb_path, {"POR_real": [1, 3, 1]}
+            )
+
+            valid = launcher._full_cache_is_valid(
+                odb_path,
+                data_path,
+                metadata_path,
+                None,
+                ["POR"],
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        self.assertFalse(valid)
+
     def test_run_workflow_extracts_then_interpolates_points(self):
         calls = []
 
@@ -493,7 +777,6 @@ class LauncherTests(unittest.TestCase):
             metadata_path=r"D:\work\output\meta.json",
             fields=["U"],
             points_path=r"D:\work\points.csv",
-            point_fields=["U"],
             neighbors=5,
             exact_tol=1.0e-8,
             extraction_runner=fake_extraction,
@@ -509,9 +792,52 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(calls[1][1]["output_path"], r"D:\work\output\data.npz")
         self.assertEqual(calls[1][1]["metadata_output_path"], r"D:\work\output\meta.json")
         self.assertEqual(calls[1][1]["points_path"], r"D:\work\points.csv")
-        self.assertEqual(calls[1][1]["fields"], ["U"])
+        self.assertIsNone(calls[1][1]["fields"])
         self.assertEqual(calls[1][1]["neighbors"], 5)
         self.assertEqual(calls[1][1]["exact_tol"], 1.0e-8)
+
+    def test_run_workflow_reuses_valid_full_cache_without_extraction(self):
+        calls = []
+
+        def extraction_runner(**kwargs):
+            calls.append(("extract", kwargs))
+            return 0
+
+        def point_runner(**kwargs):
+            calls.append(("points", kwargs))
+
+        with contextlib.nullcontext(
+            self._cache_validator_test_dir("valid-hit")
+        ) as temp_dir:
+            odb_path = os.path.join(temp_dir, "model.odb")
+            point_output_path = os.path.join(temp_dir, "surface_points.npz")
+            point_metadata_path = os.path.join(temp_dir, "surface_points.json")
+            cache_path, cache_metadata_path = launcher.default_full_cache_paths(
+                odb_path, point_output_path
+            )
+            open(odb_path, "wb").close()
+            np.savez_compressed(cache_path, POR_real=np.zeros((1, 2, 1)))
+            self._write_full_cache_metadata(
+                cache_metadata_path, odb_path, {"POR_real": [1, 2, 1]}
+            )
+
+            code = launcher.run_workflow(
+                abaqus_command="abaqus",
+                odb_path=odb_path,
+                output_path=point_output_path,
+                metadata_path=point_metadata_path,
+                fields=["POR"],
+                points_path=r"D:\work\points.csv",
+                keep_full_cache=True,
+                extraction_runner=extraction_runner,
+                point_runner=point_runner,
+                verbose=False,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual([name for name, _kwargs in calls], ["points"])
+        self.assertEqual(calls[0][1]["data_path"], cache_path)
+        self.assertEqual(calls[0][1]["fields"], None)
 
     def test_run_workflow_skips_point_export_when_extraction_fails(self):
         point_calls = []
@@ -629,30 +955,50 @@ class LauncherTests(unittest.TestCase):
         app = object.__new__(launcher.ExtractOdbApp)
         app.odb_var = self.FakeVar("data/test1.odb")
         app.output_var = self.FakeVar("output/data.npz")
-        app.metadata_var = self.FakeVar("output/meta.json")
         app.step_var = self.FakeVar("Step-1")
-        app.fields_var = self.FakeVar("U V")
         app.instances_var = self.FakeVar("PART-1-1")
         app.node_labels_var = self.FakeVar("1 2")
         app.frequency_min_var = self.FakeVar("5")
         app.frequency_max_var = self.FakeVar("50")
         app.points_var = self.FakeVar("points.csv")
-        app.point_fields_var = self.FakeVar("U")
         app.neighbors_var = self.FakeVar("6")
         app.exact_tol_var = self.FakeVar("1e-8")
         app.abaqus_var = self.FakeVar("abaqus")
-        app.field_vars = {}
+        app.keep_full_cache_var = self.FakeVar(False)
+        app.field_vars = {"U": self.FakeVar(True), "V": self.FakeVar(True)}
         app.node_sets_var = self.FakeVar("")
         app.node_set_vars = {}
 
         options = app._validate_inputs()
 
         self.assertEqual(options["points_path"], "points.csv")
+        self.assertEqual(options["metadata_path"], "output/data_metadata.json")
         self.assertNotIn("point_output_path", options)
         self.assertNotIn("csv_components", options)
-        self.assertEqual(options["point_fields"], ["U"])
+        self.assertNotIn("point_fields", options)
         self.assertEqual(options["neighbors"], 6)
         self.assertEqual(options["exact_tol"], 1.0e-8)
+
+    def test_validate_inputs_includes_full_cache_option(self):
+        app = launcher.ExtractOdbApp.__new__(launcher.ExtractOdbApp)
+        app.odb_var = self.FakeVar("model.odb")
+        app.abaqus_var = self.FakeVar("abaqus")
+        app.field_vars = {"POR": self.FakeVar(True), "U": self.FakeVar(True)}
+        app.node_labels_var = self.FakeVar("")
+        app.frequency_min_var = self.FakeVar("")
+        app.frequency_max_var = self.FakeVar("")
+        app.neighbors_var = self.FakeVar("4")
+        app.exact_tol_var = self.FakeVar("1e-9")
+        app.node_sets_var = self.FakeVar("")
+        app.instances_var = self.FakeVar("")
+        app.output_var = self.FakeVar("points.npz")
+        app.step_var = self.FakeVar("")
+        app.points_var = self.FakeVar("points.csv")
+        app.keep_full_cache_var = self.FakeVar(True)
+
+        options = app._validate_inputs()
+
+        self.assertTrue(options["keep_full_cache"])
 
     def test_main_without_arguments_runs_gui(self):
         calls = []
@@ -836,20 +1182,18 @@ class LauncherTests(unittest.TestCase):
         app = object.__new__(launcher.ExtractOdbApp)
         app.odb_var = self.FakeVar("data/test1.odb")
         app.output_var = self.FakeVar("output/data.npz")
-        app.metadata_var = self.FakeVar("output/meta.json")
         app.step_var = self.FakeVar("Step-1")
-        app.fields_var = self.FakeVar("U V")
         app.instances_var = self.FakeVar("PART-1-1")
         app.node_labels_var = self.FakeVar("")
         app.node_sets_var = self.FakeVar("NSET_TOP NSET_BOTTOM")
         app.frequency_min_var = self.FakeVar("")
         app.frequency_max_var = self.FakeVar("")
         app.points_var = self.FakeVar("")
-        app.point_fields_var = self.FakeVar("")
         app.neighbors_var = self.FakeVar("4")
         app.exact_tol_var = self.FakeVar("")
         app.abaqus_var = self.FakeVar("abaqus")
-        app.field_vars = {}
+        app.keep_full_cache_var = self.FakeVar(False)
+        app.field_vars = {"U": self.FakeVar(True), "V": self.FakeVar(True)}
 
         options = app._validate_inputs()
 
@@ -859,20 +1203,17 @@ class LauncherTests(unittest.TestCase):
         app = object.__new__(launcher.ExtractOdbApp)
         app.odb_var = self.FakeVar("data/test1.odb")
         app.output_var = self.FakeVar("output/data.npz")
-        app.metadata_var = self.FakeVar("output/meta.json")
         app.step_var = self.FakeVar("Step-1")
-        app.fields_var = self.FakeVar("U V")
         app.instances_var = self.FakeVar("")
         app.node_labels_var = self.FakeVar("")
         app.node_sets_var = self.FakeVar("NSET_TOP")
         app.frequency_min_var = self.FakeVar("")
         app.frequency_max_var = self.FakeVar("")
         app.points_var = self.FakeVar("points.xlsx")
-        app.point_fields_var = self.FakeVar("")
         app.neighbors_var = self.FakeVar("4")
         app.exact_tol_var = self.FakeVar("")
         app.abaqus_var = self.FakeVar("abaqus")
-        app.field_vars = {}
+        app.field_vars = {"U": self.FakeVar(True), "V": self.FakeVar(True)}
 
         with mock.patch("tkinter.messagebox.showerror") as showerror:
             options = app._validate_inputs()

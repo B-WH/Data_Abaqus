@@ -110,11 +110,6 @@ def _read_excel_query_points(path):
         workbook.close()
 
 
-def read_query_points(path):
-    points, _source = read_query_point_file(path)
-    return points
-
-
 def read_query_point_file(path):
     extension = os.path.splitext(path)[1].lower()
     if extension == ".csv":

@@ -115,12 +115,6 @@ def _numpy():
     return importlib.import_module("numpy")
 
 
-def _full_array(np, shape, fill_value, dtype=float):
-    array = np.empty(shape, dtype=dtype)
-    array.fill(fill_value)
-    return array
-
-
 def _log_elapsed(label, start_time, now=None):
     current_time = time.time() if now is None else now
     print("[timing] {}: {:.3f} s".format(label, current_time - start_time))
@@ -376,41 +370,6 @@ def _value_data_tuple(value):
         return (value,)
 
 
-def _component_count_from_step(step, fields):
-    for frame in step.frames:
-        for field_name in fields:
-            if field_name not in frame.fieldOutputs:
-                continue
-            field = frame.fieldOutputs[field_name]
-            values = _get_field_values(field)
-            if len(values):
-                return len(_value_data_tuple(values[0].data))
-    return 0
-
-
-def _component_count_for_field(step, field_name):
-    component_count = 0
-    for frame in step.frames:
-        if field_name not in frame.fieldOutputs:
-            continue
-        for value in _get_field_values(frame.fieldOutputs[field_name]):
-            component_count = max(component_count, len(_value_data_tuple(value.data)))
-    return component_count
-
-
-def _component_labels_for_field(step, field_name, component_count):
-    for frame in step.frames:
-        if field_name not in frame.fieldOutputs:
-            continue
-        labels = getattr(frame.fieldOutputs[field_name], "componentLabels", None)
-        if labels and len(labels) == component_count:
-            return [str(label) for label in labels]
-
-    if component_count == 1:
-        return [field_name]
-    return ["component_{}".format(index + 1) for index in range(component_count)]
-
-
 def _get_field_values(field):
     if hasattr(field, "values"):
         return field.values
@@ -464,29 +423,6 @@ def _sort_key(key):
     return tuple("" if part is None else part for part in key)
 
 
-def _field_location_from_step(step, field_name):
-    for frame in step.frames:
-        if field_name not in frame.fieldOutputs:
-            continue
-        values = _get_field_values(frame.fieldOutputs[field_name])
-        if len(values):
-            return _field_value_key(values[0])[0]
-    return "NODE"
-
-
-def _collect_field_point_keys(step, field_name, nodes, location):
-    if location == "NODE":
-        return [_node_key(node) for node in nodes]
-
-    keys = set()
-    for frame in step.frames:
-        if field_name not in frame.fieldOutputs:
-            continue
-        for ordinal, value in enumerate(_get_field_values(frame.fieldOutputs[field_name])):
-            keys.add(_field_value_key(value, ordinal))
-    return sorted(keys, key=_sort_key)
-
-
 def _field_point_metadata(key):
     location = key[0]
     if location == "NODE":
@@ -507,6 +443,58 @@ def _array_layout_for_location(location):
     if location == "ELEMENT":
         return ["frame", "element_point", "component"]
     return ["frame", "value", "component"]
+
+
+def _bulk_block_array(np, values, row_count):
+    array = np.asarray(values, dtype=float)
+    if row_count == 0:
+        return array.reshape((0, 0))
+    if array.ndim == 1:
+        if array.size % row_count:
+            raise ValueError("Bulk field data size does not match node labels.")
+        array = array.reshape((row_count, array.size // row_count))
+    if array.ndim != 2 or array.shape[0] != row_count:
+        raise ValueError("Bulk field data shape does not match node labels.")
+    return array
+
+
+def _bulk_node_field_info(field):
+    blocks = getattr(field, "bulkDataBlocks", None)
+    if blocks is None:
+        return None
+    np = _numpy()
+    component_count = None
+    labels = []
+    try:
+        for block in blocks:
+            if str(getattr(block, "position", "")) != "NODAL":
+                return None
+            node_labels = getattr(block, "nodeLabels", None)
+            if node_labels is None:
+                return None
+            if not len(node_labels):
+                continue
+            data = _bulk_block_array(np, block.data, len(node_labels))
+            component_labels = getattr(field, "componentLabels", None)
+            if not component_labels:
+                component_labels = getattr(block, "componentLabels", None)
+            if component_labels and len(component_labels) != data.shape[1]:
+                return None
+            raw_imag = getattr(block, "conjugateData", None)
+            if raw_imag is not None and len(raw_imag):
+                imag = _bulk_block_array(np, raw_imag, len(node_labels))
+                if imag.shape[1] != data.shape[1]:
+                    return None
+            if component_count is None:
+                component_count = data.shape[1]
+                labels = [str(label) for label in (component_labels or [])]
+            elif data.shape[1] != component_count:
+                return None
+    except Exception:
+        return None
+    if component_count is None:
+        return None
+    return component_count, labels
 
 
 def _collect_field_metadata(step, fields, nodes, frequency_min, frequency_max):
@@ -536,6 +524,15 @@ def _collect_field_metadata(step, fields, nodes, frequency_min, frequency_max):
             if field_name not in frame.fieldOutputs:
                 continue
             field = frame.fieldOutputs[field_name]
+            bulk_info = _bulk_node_field_info(field)
+            if bulk_info is not None:
+                component_count, labels = bulk_info
+                first_frame_index = frame_index
+                field_locations[field_name] = "NODE"
+                field_max_components[field_name] = component_count
+                if labels:
+                    field_raw_labels[field_name] = labels
+                break
             values = _get_field_values(field)
             if not len(values):
                 continue
@@ -608,17 +605,65 @@ def _collect_field_metadata(step, fields, nodes, frequency_min, frequency_max):
     return filtered_frames, frequencies, field_meta, point_keys_map, point_indexes
 
 
-def _filter_frames_by_frequency(frames, frequency_min=None, frequency_max=None):
-    """Filter frames by frequency.  Kept for backward compatibility."""
-    filtered_frames = []
-    for frame in frames:
-        frequency = float(frame.frameValue)
-        if frequency_min is not None and frequency < frequency_min:
+def _fill_node_field_from_bulk(
+    np,
+    field,
+    frame_index,
+    point_index,
+    component_count,
+    real_data,
+    imag_data,
+):
+    blocks = getattr(field, "bulkDataBlocks", None)
+    if blocks is None:
+        return None
+    prepared = []
+    try:
+        for block in blocks:
+            if str(getattr(block, "position", "")) != "NODAL":
+                return None
+            labels = getattr(block, "nodeLabels", None)
+            if labels is None:
+                return None
+            block_real = _bulk_block_array(np, block.data, len(labels))
+            if block_real.shape[1] != component_count:
+                return None
+            component_labels = getattr(field, "componentLabels", None)
+            if not component_labels:
+                component_labels = getattr(block, "componentLabels", None)
+            if component_labels and len(component_labels) != component_count:
+                return None
+            raw_imag = getattr(block, "conjugateData", None)
+            if raw_imag is None or not len(raw_imag):
+                block_imag = np.zeros(block_real.shape, dtype=float)
+            else:
+                block_imag = _bulk_block_array(np, raw_imag, len(labels))
+            if block_imag.shape[1] != component_count:
+                return None
+            instance_name = getattr(getattr(block, "instance", None), "name", "")
+            rows = []
+            outputs = []
+            keys = []
+            for row_index, label in enumerate(labels):
+                key = ("NODE", instance_name, int(label))
+                output_index = point_index.get(key)
+                if output_index is None:
+                    continue
+                rows.append(row_index)
+                outputs.append(output_index)
+                keys.append(key)
+            prepared.append((rows, outputs, keys, block_real, block_imag))
+    except Exception:
+        return None
+
+    seen = set()
+    for rows, outputs, keys, block_real, block_imag in prepared:
+        if not rows:
             continue
-        if frequency_max is not None and frequency > frequency_max:
-            continue
-        filtered_frames.append(frame)
-    return filtered_frames
+        real_data[frame_index, outputs, :] = block_real[rows, :]
+        imag_data[frame_index, outputs, :] = block_imag[rows, :]
+        seen.update(keys)
+    return seen
 
 
 def extract_field_arrays(step, nodes, fields, frequency_min=None, frequency_max=None):
@@ -682,19 +727,31 @@ def extract_field_arrays(step, nodes, fields, frequency_min=None, frequency_max=
                 continue
 
             field = frame.fieldOutputs[field_name]
-            seen = set()
-            for ordinal, value in enumerate(_get_field_values(field)):
-                key = _field_value_key(value, ordinal)
-                if key not in point_index:
-                    continue
-                output_index = point_index[key]
-                real_values = _tuple_to_float_array(value.data)
-                imag_values = _tuple_to_float_array(
-                    getattr(value, "conjugateData", np.zeros(len(real_values)))
+            seen = None
+            if location == "NODE":
+                seen = _fill_node_field_from_bulk(
+                    np,
+                    field,
+                    frame_index,
+                    point_index,
+                    component_count,
+                    real_data,
+                    imag_data,
                 )
-                real_data[frame_index, output_index, : len(real_values)] = real_values
-                imag_data[frame_index, output_index, : len(imag_values)] = imag_values
-                seen.add(key)
+            if seen is None:
+                seen = set()
+                for ordinal, value in enumerate(_get_field_values(field)):
+                    key = _field_value_key(value, ordinal)
+                    if key not in point_index:
+                        continue
+                    output_index = point_index[key]
+                    real_values = _tuple_to_float_array(value.data)
+                    imag_values = _tuple_to_float_array(
+                        getattr(value, "conjugateData", np.zeros(len(real_values)))
+                    )
+                    real_data[frame_index, output_index, : len(real_values)] = real_values
+                    imag_data[frame_index, output_index, : len(imag_values)] = imag_values
+                    seen.add(key)
 
             missing_count = len(point_keys) - len(seen)
             if missing_count:
