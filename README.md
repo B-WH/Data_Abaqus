@@ -113,7 +113,6 @@ metadata JSON 中的 `points[].method` 表示取值方式：
 
 注意：当前目标点导出是节点值精确命中或反距离加权，不是基于 Abaqus 单元形函数的严格单元内插值。
 
-
 ## 合并多个频率段结果
 
 如果同一模型分多个 ODB 计算不同频率段，例如 `1-100 Hz`、`100-200 Hz`、
@@ -225,7 +224,7 @@ python -m mesh_convert input.stp output.inp --dim auto --target hex --size 2.0 -
 - 如果目标是 `hex` 或 `quad`，但实际生成 mixed 单元，默认会以非零退出码失败并说明原因。接受 mixed 输出时显式加 `--allow-degrade`。
 - 现有 Gmsh physical groups 会尽量保留为 Abaqus `*NSET` 和 `*ELSET`；没有分组时会生成 `VOL_<tag>`、`SURF_<tag>` 等稳定名称。
 
-### 测试
+### 网格转换测试
 
 单元测试不需要 Abaqus，也不需要真实 Gmsh 后端：
 
