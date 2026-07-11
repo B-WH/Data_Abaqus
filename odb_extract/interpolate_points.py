@@ -167,6 +167,10 @@ def _available_node_fields(metadata):
     )
 
 
+def available_node_sets(metadata):
+    return sorted((metadata.get("node_sets") or {}).keys())
+
+
 def _validate_field(metadata, field_name):
     field_outputs = metadata.get("field_outputs") or {}
     field_metadata = field_outputs.get(field_name)
@@ -177,11 +181,14 @@ def _validate_field(metadata, field_name):
     return field_metadata
 
 
-def _coordinates_for_field(field_metadata, coordinate_lookup):
+def _coordinates_for_field(field_metadata, coordinate_lookup, allowed_node_keys=None):
     coordinates = []
     labels = []
-    for point in field_metadata.get("points") or []:
+    indexes = []
+    for index, point in enumerate(field_metadata.get("points") or []):
         key = (point.get("instance", ""), int(point.get("node_label")))
+        if allowed_node_keys is not None and key not in allowed_node_keys:
+            continue
         if key not in coordinate_lookup:
             raise ValueError(
                 "Node coordinates are missing for instance {} node {}.".format(
@@ -191,9 +198,40 @@ def _coordinates_for_field(field_metadata, coordinate_lookup):
             )
         labels.append(int(key[1]))
         coordinates.append(coordinate_lookup[key])
+        indexes.append(index)
     if not coordinates:
         raise ValueError("Field has no node points to interpolate.")
-    return np.asarray(coordinates, dtype=float), np.asarray(labels, dtype=np.int64)
+    return (
+        np.asarray(coordinates, dtype=float),
+        np.asarray(labels, dtype=np.int64),
+        np.asarray(indexes, dtype=np.int64),
+    )
+
+
+def _selected_node_keys(data, metadata, node_sets):
+    if not node_sets:
+        return None
+    nodes = metadata.get("nodes") or []
+    definitions = metadata.get("node_sets") or {}
+    selected = set()
+    for name in node_sets:
+        definition = definitions.get(name)
+        if not isinstance(definition, dict):
+            raise ValueError("Node set {} is not present in cached metadata.".format(name))
+        key = definition.get("indices_key")
+        if not key or key not in data:
+            raise ValueError("Node set {} membership array is missing.".format(name))
+        indices = np.asarray(data[key])
+        if indices.ndim != 1 or not np.issubdtype(indices.dtype, np.integer):
+            raise ValueError("Node set {} membership array is invalid.".format(name))
+        if len(indices) != int(definition.get("member_count", -1)):
+            raise ValueError("Node set {} member count does not match its array.".format(name))
+        if not len(indices) or int(np.min(indices)) < 0 or int(np.max(indices)) >= len(nodes):
+            raise ValueError("Node set {} contains an invalid cached node index.".format(name))
+        for index in indices.tolist():
+            node = nodes[int(index)]
+            selected.add((node.get("instance", ""), int(node.get("label"))))
+    return selected
 
 
 def _neighbor_weights(node_coordinates, query_coordinates, neighbors, exact_tol):
@@ -243,6 +281,7 @@ def _build_point_arrays(
     requested_fields,
     neighbors,
     exact_tol,
+    allowed_node_keys=None,
 ):
     field_metadata_by_name = {
         field_name: _validate_field(metadata, field_name) for field_name in requested_fields
@@ -269,12 +308,20 @@ def _build_point_arrays(
 
     for field_name in requested_fields:
         field_metadata = field_metadata_by_name[field_name]
-        node_coordinates, node_labels = _coordinates_for_field(field_metadata, coordinate_lookup)
+        node_coordinates, node_labels, field_indexes = _coordinates_for_field(
+            field_metadata,
+            coordinate_lookup,
+            allowed_node_keys=allowed_node_keys,
+        )
         components = field_metadata.get("components") or [
             "component_{}".format(index + 1) for index in range(data["{}_real".format(field_name)].shape[2])
         ]
-        real_data = np.asarray(data["{}_real".format(field_name)], dtype=float)
-        imag_data = np.asarray(data["{}_imag".format(field_name)], dtype=float)
+        real_data = np.asarray(data["{}_real".format(field_name)], dtype=float)[
+            :, field_indexes, :
+        ]
+        imag_data = np.asarray(data["{}_imag".format(field_name)], dtype=float)[
+            :, field_indexes, :
+        ]
         real_output = np.empty(
             (len(frequencies), len(query_points), len(components)),
             dtype=float,
@@ -321,6 +368,7 @@ def interpolate_files(
     output_path,
     metadata_output_path,
     fields=None,
+    node_sets=None,
     neighbors=4,
     exact_tol=1.0e-9,
 ):
@@ -330,6 +378,7 @@ def interpolate_files(
     if not query_points:
         raise ValueError("Point file does not contain any coordinate rows.")
     with np.load(data_path) as data:
+        allowed_node_keys = _selected_node_keys(data, source_metadata, node_sets)
         arrays, point_records, field_outputs = _build_point_arrays(
             data,
             source_metadata,
@@ -337,6 +386,7 @@ def interpolate_files(
             requested_fields,
             neighbors,
             exact_tol,
+            allowed_node_keys=allowed_node_keys,
         )
         array_shapes = {name: list(array.shape) for name, array in arrays.items()}
 
@@ -367,6 +417,7 @@ def interpolate_files(
         "interpolation": {
             "neighbors": int(neighbors),
             "exact_tol": float(exact_tol),
+            "node_sets": list(node_sets or []),
         },
         "warnings": [],
     }

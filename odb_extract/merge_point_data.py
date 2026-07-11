@@ -192,6 +192,8 @@ def _validate_part_matches_base(base, part, base_layouts):
         raise ValueError("fields do not match between metadata files.")
     if metadata.get("field_outputs") != base_metadata.get("field_outputs"):
         raise ValueError("field_outputs do not match between metadata files.")
+    if (metadata.get("node_sets") or {}) != (base_metadata.get("node_sets") or {}):
+        raise ValueError("node_sets do not match between metadata files.")
     if (metadata.get("array_layouts") or {}) != base_layouts:
         raise ValueError("array_layouts do not match between metadata files.")
     if _node_identity(metadata) != _node_identity(base_metadata):

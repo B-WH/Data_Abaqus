@@ -74,6 +74,19 @@ class MergePointDataTests(unittest.TestCase):
             "metadata": self._metadata(frequencies, source_odb=source_odb),
         }
 
+    def _with_node_set(self, part, indices):
+        part["arrays"]["node_set_0000_indices"] = np.asarray(indices, dtype=np.int64)
+        part["metadata"]["tool"]["metadata_schema_version"] = 3
+        part["metadata"]["array_shapes"]["node_set_0000_indices"] = [len(indices)]
+        part["metadata"]["array_layouts"]["node_set_0000_indices"] = ["node_set_member"]
+        part["metadata"]["node_sets"] = {
+            "SET_A": {
+                "indices_key": "node_set_0000_indices",
+                "member_count": len(indices),
+            }
+        }
+        return part
+
     def test_merge_parts_concatenates_frequency_frames(self):
         arrays, metadata = merge_point_data.merge_parts(
             [
@@ -150,6 +163,35 @@ class MergePointDataTests(unittest.TestCase):
         second["arrays"]["node_coordinates"][1, 0] = 2.0
 
         with self.assertRaisesRegex(ValueError, "node_coordinates"):
+            merge_point_data.merge_parts([first, second])
+
+    def test_merge_parts_preserves_matching_node_set_membership(self):
+        first = self._with_node_set(self._part([1.0], source_odb="a.odb"), [0])
+        second = self._with_node_set(self._part([2.0], source_odb="b.odb"), [0])
+
+        arrays, metadata = merge_point_data.merge_parts([first, second])
+
+        self.assertEqual(arrays["node_set_0000_indices"].tolist(), [0])
+        self.assertEqual(metadata["node_sets"]["SET_A"]["member_count"], 1)
+
+    def test_merge_parts_rejects_mismatched_node_set_membership(self):
+        first = self._with_node_set(self._part([1.0], source_odb="a.odb"), [0])
+        second = self._with_node_set(self._part([2.0], source_odb="b.odb"), [1])
+
+        with self.assertRaisesRegex(ValueError, "node_set_0000_indices"):
+            merge_point_data.merge_parts([first, second])
+
+    def test_merge_parts_rejects_mismatched_node_set_metadata(self):
+        first = self._with_node_set(self._part([1.0], source_odb="a.odb"), [0])
+        second = self._with_node_set(self._part([2.0], source_odb="b.odb"), [0])
+        second["metadata"]["node_sets"] = {
+            "SET_OTHER": {
+                "indices_key": "node_set_0000_indices",
+                "member_count": 1,
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "node_sets"):
             merge_point_data.merge_parts([first, second])
 
     def test_merge_parts_rejects_mismatched_fields(self):

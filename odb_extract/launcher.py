@@ -26,6 +26,10 @@ UI_TEXT = {
     "ready": "就绪",
     "running": "运行中",
     "odb_file": "ODB 文件",
+    "source_mode": "数据来源",
+    "source_odb": "ODB 提取",
+    "source_cache": "已有缓存",
+    "cache_file": "缓存 NPZ",
     "npz_output": "NPZ 输出",
     "points_file": "目标点坐标文件",
     "neighbors": "邻近点数量",
@@ -41,10 +45,22 @@ UI_TEXT = {
     "available_fields": "可用场输出",
     "field_hint": "请选择 ODB 文件以读取场输出。",
     "run_button": "开始提取",
+    "run_cache_button": "开始查询",
     "browse": "浏览",
     "select_odb_title": "选择 Abaqus ODB 文件",
     "select_npz_title": "选择 NPZ 输出文件",
     "select_points_title": "选择目标点坐标文件",
+    "select_cache_title": "选择节点数据缓存",
+    "refresh_cache_fields": "读取缓存字段",
+    "cache_loaded": "已读取缓存：{fields} 个节点场，{node_sets} 个节点集。",
+    "cache_without_node_sets": "此缓存不包含节点集成员信息，将使用全部缓存节点。",
+    "invalid_cache_title": "缓存文件无效",
+    "missing_cache_message": "请选择兼容的节点数据 NPZ 缓存。",
+    "missing_points_for_cache": "缓存查询必须选择目标点 CSV 或 Excel 文件。",
+    "missing_output_for_cache": "缓存查询必须设置目标点 NPZ 输出路径。",
+    "cache_output_conflict": "缓存查询输出不能覆盖源缓存 NPZ 或配套 metadata。",
+    "starting_cache_query": "开始从缓存查询目标点。",
+    "cache_query_finished": "缓存目标点查询完成。",
     "no_fields_found": "未找到场输出。",
     "found_fields": "已在 Step {step} 中找到 {count} 个场输出。",
     "select_odb_first": "请先选择 ODB 文件，再读取场输出。",
@@ -205,6 +221,69 @@ def metadata_path_for_output(data_path):
     if data_path.lower().endswith(suffix):
         return data_path[: -len(suffix)] + "_metadata.json"
     return os.path.splitext(data_path)[0] + "_metadata.json"
+
+
+def default_cache_query_output_path(cache_path, points_path):
+    point_name = os.path.splitext(os.path.basename(points_path))[0]
+    return os.path.join(
+        os.path.dirname(os.path.abspath(cache_path)),
+        "{}_point_data.npz".format(point_name),
+    )
+
+
+def _same_path(first, second):
+    return os.path.normcase(os.path.abspath(first)) == os.path.normcase(os.path.abspath(second))
+
+
+def load_cache_source(data_path):
+    from odb_extract import interpolate_points
+
+    if not os.path.isfile(data_path):
+        raise ValueError("缓存 NPZ 不存在：{}".format(data_path))
+    metadata_path = metadata_path_for_output(data_path)
+    if not os.path.isfile(metadata_path):
+        raise ValueError("找不到配套 metadata：{}".format(metadata_path))
+    metadata = interpolate_points.load_metadata(metadata_path)
+    fields = interpolate_points._available_node_fields(metadata)
+    if not fields:
+        raise ValueError("缓存中没有可用于目标点查询的节点场。")
+    nodes = metadata.get("nodes") or []
+    shapes = metadata.get("array_shapes") or {}
+    if not _npz_shapes_match(data_path, shapes):
+        raise ValueError("缓存数组与 metadata 记录的形状不一致。")
+    required = ["frequencies", "node_labels", "node_coordinates"]
+    required.extend(
+        key for field in fields for key in ("{}_real".format(field), "{}_imag".format(field))
+    )
+    missing = [key for key in required if key not in shapes]
+    if missing:
+        raise ValueError("缓存缺少数组：{}".format(", ".join(missing)))
+    coordinate_shape = shapes["node_coordinates"]
+    if coordinate_shape != [len(nodes), 3] or shapes["node_labels"] != [len(nodes)]:
+        raise ValueError("缓存节点坐标与 metadata 不一致。")
+    frequency_count = shapes["frequencies"][0]
+    for field in fields:
+        point_count = len(metadata["field_outputs"][field].get("points") or [])
+        real_shape = shapes["{}_real".format(field)]
+        imag_shape = shapes["{}_imag".format(field)]
+        if (
+            real_shape != imag_shape
+            or len(real_shape) != 3
+            or real_shape[0] != frequency_count
+            or real_shape[1] != point_count
+        ):
+            raise ValueError("缓存场 {} 的数组形状与 metadata 不一致。".format(field))
+    node_sets = interpolate_points.available_node_sets(metadata)
+    with interpolate_points.np.load(data_path) as data:
+        for name in node_sets:
+            interpolate_points._selected_node_keys(data, metadata, [name])
+    return {
+        "data_path": data_path,
+        "metadata_path": metadata_path,
+        "metadata": metadata,
+        "fields": fields,
+        "node_sets": node_sets,
+    }
 
 
 def default_full_cache_paths(odb_path, output_path=None):
@@ -653,6 +732,38 @@ def _default_point_runner(**kwargs):
     return interpolate_points.interpolate_files(**kwargs)
 
 
+def run_cached_point_query(
+    data_path,
+    metadata_path,
+    points_path,
+    output_path,
+    metadata_output_path,
+    fields,
+    node_sets=None,
+    neighbors=4,
+    exact_tol=1.0e-9,
+    point_runner=None,
+    log_callback=None,
+):
+    if log_callback:
+        log_callback(UI_TEXT["starting_cache_query"])
+    runner = _default_point_runner if point_runner is None else point_runner
+    runner(
+        data_path=data_path,
+        metadata_path=metadata_path,
+        points_path=points_path,
+        output_path=output_path,
+        metadata_output_path=metadata_output_path,
+        fields=fields,
+        node_sets=node_sets,
+        neighbors=neighbors,
+        exact_tol=exact_tol,
+    )
+    if log_callback:
+        log_callback(UI_TEXT["cache_query_finished"])
+    return 0
+
+
 def _missing_file_paths(paths):
     return [path for path in paths if path and not os.path.isfile(path)]
 
@@ -861,7 +972,9 @@ class ExtractOdbApp(object):
         self.root.geometry("880x720")
         self.root.minsize(760, 620)
 
+        self.source_mode_var = tk.StringVar(value="odb")
         self.odb_var = tk.StringVar()
+        self.cache_var = tk.StringVar()
         self.output_var = tk.StringVar()
         self.points_var = tk.StringVar()
         self.neighbors_var = tk.StringVar(value="4")
@@ -909,12 +1022,45 @@ class ExtractOdbApp(object):
         frame.columnconfigure(1, weight=1)
         frame.rowconfigure(19, weight=1)
 
-        self._add_path_row(frame, 0, UI_TEXT["odb_file"], self.odb_var, self.choose_odb)
-        self._add_path_row(frame, 1, UI_TEXT["npz_output"], self.output_var, self.choose_output)
-        self._add_path_row(frame, 3, UI_TEXT["points_file"], self.points_var, self.choose_points)
-        self._add_path_row(frame, 4, UI_TEXT["abaqus_command"], self.abaqus_var, None)
+        ttk.Label(frame, text=UI_TEXT["source_mode"]).grid(row=0, column=0, sticky="w", pady=4)
+        source_frame = ttk.Frame(frame)
+        source_frame.grid(row=0, column=1, columnspan=2, sticky="w", pady=4)
+        source_odb_button = ttk.Radiobutton(
+            source_frame,
+            text=UI_TEXT["source_odb"],
+            variable=self.source_mode_var,
+            value="odb",
+            command=self._update_source_mode,
+        )
+        source_odb_button.pack(side="left")
+        source_cache_button = ttk.Radiobutton(
+            source_frame,
+            text=UI_TEXT["source_cache"],
+            variable=self.source_mode_var,
+            value="cache",
+            command=self._update_source_mode,
+        )
+        source_cache_button.pack(side="left", padx=(12, 0))
+        self.source_buttons = [source_odb_button, source_cache_button]
+
+        self.odb_entry, self.odb_browse_button = self._add_path_row(
+            frame, 1, UI_TEXT["odb_file"], self.odb_var, self.choose_odb
+        )
+        self.cache_entry, self.cache_browse_button = self._add_path_row(
+            frame, 2, UI_TEXT["cache_file"], self.cache_var, self.choose_cache
+        )
+        self.output_entry, self.output_browse_button = self._add_path_row(
+            frame, 3, UI_TEXT["npz_output"], self.output_var, self.choose_output
+        )
+        self.points_entry, self.points_browse_button = self._add_path_row(
+            frame, 4, UI_TEXT["points_file"], self.points_var, self.choose_points
+        )
+        self.abaqus_entry, _unused_button = self._add_path_row(
+            frame, 5, UI_TEXT["abaqus_command"], self.abaqus_var, None
+        )
         ttk.Label(frame, text="Step").grid(row=7, column=0, sticky="w", pady=4)
-        ttk.Entry(frame, textvariable=self.step_var).grid(
+        self.step_entry = ttk.Entry(frame, textvariable=self.step_var)
+        self.step_entry.grid(
             row=7, column=1, columnspan=2, sticky="ew", pady=4
         )
 
@@ -926,14 +1072,16 @@ class ExtractOdbApp(object):
         )
 
         ttk.Label(frame, text=UI_TEXT["instance_filter"]).grid(row=9, column=0, sticky="w", pady=4)
-        ttk.Entry(frame, textvariable=self.instances_var).grid(
+        self.instances_entry = ttk.Entry(frame, textvariable=self.instances_var)
+        self.instances_entry.grid(
             row=9, column=1, columnspan=2, sticky="ew", pady=4
         )
 
         ttk.Label(frame, text=UI_TEXT["node_label_filter"]).grid(
             row=10, column=0, sticky="w", pady=4
         )
-        ttk.Entry(frame, textvariable=self.node_labels_var).grid(
+        self.node_labels_entry = ttk.Entry(frame, textvariable=self.node_labels_var)
+        self.node_labels_entry.grid(
             row=10, column=1, columnspan=2, sticky="ew", pady=4
         )
 
@@ -944,13 +1092,19 @@ class ExtractOdbApp(object):
         frequency_frame.grid(row=13, column=1, columnspan=2, sticky="ew", pady=4)
         frequency_frame.columnconfigure(0, weight=1)
         frequency_frame.columnconfigure(2, weight=1)
-        ttk.Entry(frequency_frame, textvariable=self.frequency_min_var).grid(
+        self.frequency_min_entry = ttk.Entry(
+            frequency_frame, textvariable=self.frequency_min_var
+        )
+        self.frequency_min_entry.grid(
             row=0, column=0, sticky="ew"
         )
         ttk.Label(frequency_frame, text=UI_TEXT["frequency_max"]).grid(
             row=0, column=1, padx=8
         )
-        ttk.Entry(frequency_frame, textvariable=self.frequency_max_var).grid(
+        self.frequency_max_entry = ttk.Entry(
+            frequency_frame, textvariable=self.frequency_max_var
+        )
+        self.frequency_max_entry.grid(
             row=0, column=2, sticky="ew"
         )
 
@@ -1019,11 +1173,14 @@ class ExtractOdbApp(object):
         )
         self.field_hint.grid(row=0, column=0, sticky="w", padx=8, pady=8)
 
-        ttk.Checkbutton(
+        self.keep_full_cache_check = ttk.Checkbutton(
             frame,
             text=UI_TEXT["keep_full_cache"],
             variable=self.keep_full_cache_var,
-        ).grid(row=17, column=0, columnspan=3, sticky="w", pady=(2, 4))
+        )
+        self.keep_full_cache_check.grid(
+            row=17, column=0, columnspan=3, sticky="w", pady=(2, 4)
+        )
 
         button_bar = ttk.Frame(frame)
         button_bar.grid(row=18, column=0, columnspan=3, sticky="ew", pady=(8, 6))
@@ -1048,20 +1205,25 @@ class ExtractOdbApp(object):
         scrollbar = ttk.Scrollbar(frame, command=self.log_text.yview)
         scrollbar.grid(row=19, column=3, sticky="ns")
         self.log_text.configure(yscrollcommand=scrollbar.set)
+        self._update_source_mode(reset=False)
 
     def _add_path_row(self, frame, row, label, variable, command):
         from tkinter import ttk
 
         ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=4)
-        ttk.Entry(frame, textvariable=variable).grid(
+        entry = ttk.Entry(frame, textvariable=variable)
+        entry.grid(
             row=row, column=1, sticky="ew", pady=4, padx=(0, 6)
         )
+        button = None
         if command is None:
             ttk.Label(frame, text="").grid(row=row, column=2, pady=4)
         else:
-            ttk.Button(frame, text=UI_TEXT["browse"], command=command).grid(
+            button = ttk.Button(frame, text=UI_TEXT["browse"], command=command)
+            button.grid(
                 row=row, column=2, sticky="ew", pady=4
             )
+        return entry, button
 
     def _build_node_set_widgets(self, frame, row_offset):
         """Build node set filter row: label, text entry, and action buttons."""
@@ -1149,6 +1311,21 @@ class ExtractOdbApp(object):
         self.refresh_fields()
         self.refresh_node_sets()
 
+    def choose_cache(self):
+        from tkinter import filedialog
+
+        path = filedialog.askopenfilename(
+            title=UI_TEXT["select_cache_title"],
+            filetypes=(("Compressed NumPy", "*.npz"), ("All files", "*.*")),
+        )
+        if not path:
+            return
+        self.cache_var.set(path)
+        self._load_cache_selection()
+        points_path = self.points_var.get().strip()
+        if points_path:
+            self.output_var.set(default_cache_query_output_path(path, points_path))
+
     def choose_output(self):
         from tkinter import filedialog
 
@@ -1179,6 +1356,65 @@ class ExtractOdbApp(object):
         )
         if path:
             self.points_var.set(path)
+            if self.source_mode_var.get() == "cache" and self.cache_var.get().strip():
+                self.output_var.set(
+                    default_cache_query_output_path(self.cache_var.get().strip(), path)
+                )
+
+    def _load_cache_selection(self):
+        from tkinter import messagebox
+
+        try:
+            source = load_cache_source(self.cache_var.get().strip())
+        except Exception as exc:
+            self.log(str(exc))
+            messagebox.showerror(UI_TEXT["invalid_cache_title"], str(exc))
+            return None
+        self._show_discovered_fields({"step": "cache", "fields": source["fields"]})
+        self._show_discovered_node_sets({"node_sets": source["node_sets"]})
+        self.log(
+            UI_TEXT["cache_loaded"].format(
+                fields=len(source["fields"]), node_sets=len(source["node_sets"])
+            )
+        )
+        if not source["node_sets"]:
+            self.log(UI_TEXT["cache_without_node_sets"])
+        return source
+
+    def _update_source_mode(self, reset=True):
+        cache_mode = self.source_mode_var.get() == "cache"
+        odb_state = "disabled" if cache_mode else "normal"
+        cache_state = "normal" if cache_mode else "disabled"
+        for widget in (
+            self.odb_entry,
+            self.odb_browse_button,
+            self.abaqus_entry,
+            self.step_entry,
+            self.instances_entry,
+            self.node_labels_entry,
+            self.frequency_min_entry,
+            self.frequency_max_entry,
+            self.refresh_nset_button,
+            self.inspect_button,
+            self.keep_full_cache_check,
+        ):
+            if widget is not None:
+                widget.configure(state=odb_state)
+        self.cache_entry.configure(state=cache_state)
+        self.cache_browse_button.configure(state=cache_state)
+        self.refresh_button.configure(
+            text=UI_TEXT["refresh_cache_fields"] if cache_mode else UI_TEXT["refresh_fields"]
+        )
+        self.run_button.configure(
+            text=UI_TEXT["run_cache_button"] if cache_mode else UI_TEXT["run_button"]
+        )
+        if not reset:
+            return
+        self._clear_field_checks()
+        self._clear_node_set_checks()
+        self.node_sets_var.set("")
+        if cache_mode and self.cache_var.get().strip():
+            self._load_cache_selection()
 
     def log(self, message):
         self.log_text.insert("end", "{}\n".format(message))
@@ -1189,6 +1425,9 @@ class ExtractOdbApp(object):
 
     def _set_running(self, running):
         self._running = running
+        for button in self.source_buttons:
+            button.configure(state="disabled" if running else "normal")
+        self.cache_browse_button.configure(state="disabled" if running else "normal")
         self.run_button.configure(state="disabled" if running else "normal")
         self.inspect_button.configure(state="disabled" if running else "normal")
         self.merge_button.configure(state="disabled" if running else "normal")
@@ -1199,6 +1438,8 @@ class ExtractOdbApp(object):
         for button in self.node_set_selection_buttons:
             button.configure(state="disabled" if running else "normal")
         self.status_var.set(UI_TEXT["running"] if running else UI_TEXT["ready"])
+        if not running:
+            self._update_source_mode(reset=False)
 
     def _update_main_scroll_region(self, _event=None):
         self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
@@ -1307,6 +1548,12 @@ class ExtractOdbApp(object):
 
     def refresh_fields(self):
         if self._running:
+            return
+        if self.source_mode_var.get() == "cache":
+            if not self.cache_var.get().strip():
+                self.log(UI_TEXT["missing_cache_message"])
+                return
+            self._load_cache_selection()
             return
         odb_path = self.odb_var.get().strip()
         if not odb_path:
@@ -1468,8 +1715,90 @@ class ExtractOdbApp(object):
             if variable.get()
         ]
 
+    def _validate_cache_inputs(self):
+        from tkinter import messagebox
+
+        cache_path = self.cache_var.get().strip()
+        if not cache_path:
+            messagebox.showerror(UI_TEXT["invalid_cache_title"], UI_TEXT["missing_cache_message"])
+            return None
+        try:
+            source = load_cache_source(cache_path)
+        except Exception as exc:
+            messagebox.showerror(UI_TEXT["invalid_cache_title"], str(exc))
+            return None
+        points_path = self.points_var.get().strip()
+        if not points_path:
+            messagebox.showerror(
+                UI_TEXT["invalid_cache_title"], UI_TEXT["missing_points_for_cache"]
+            )
+            return None
+        output_path = self.output_var.get().strip()
+        if not output_path:
+            messagebox.showerror(
+                UI_TEXT["invalid_cache_title"], UI_TEXT["missing_output_for_cache"]
+            )
+            return None
+        metadata_output_path = metadata_path_for_output(output_path)
+        if _same_path(output_path, cache_path) or _same_path(
+            metadata_output_path, source["metadata_path"]
+        ):
+            messagebox.showerror(
+                UI_TEXT["invalid_cache_title"], UI_TEXT["cache_output_conflict"]
+            )
+            return None
+        fields = self._selected_fields()
+        if not fields:
+            messagebox.showerror(
+                UI_TEXT["no_fields_selected_title"], UI_TEXT["no_fields_selected_message"]
+            )
+            return None
+        if any(field not in source["fields"] for field in fields):
+            messagebox.showerror(
+                UI_TEXT["invalid_cache_title"], "所选场输出不在缓存中。"
+            )
+            return None
+        node_sets = parse_node_set_text(self.node_sets_var.get())
+        if any(name not in source["node_sets"] for name in (node_sets or [])):
+            messagebox.showerror(
+                UI_TEXT["invalid_cache_title"], "所选节点集不在缓存中。"
+            )
+            return None
+        try:
+            neighbors = int(self.neighbors_var.get().strip() or "4")
+            if neighbors < 1:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                UI_TEXT["invalid_neighbors_title"], UI_TEXT["invalid_neighbors_message"]
+            )
+            return None
+        try:
+            exact_tol = parse_optional_float(self.exact_tol_var.get())
+        except ValueError:
+            messagebox.showerror(
+                UI_TEXT["invalid_exact_tol_title"], UI_TEXT["invalid_exact_tol_message"]
+            )
+            return None
+        return {
+            "source_mode": "cache",
+            "data_path": cache_path,
+            "metadata_path": source["metadata_path"],
+            "points_path": points_path,
+            "output_path": output_path,
+            "metadata_output_path": metadata_output_path,
+            "fields": fields,
+            "node_sets": node_sets,
+            "neighbors": neighbors,
+            "exact_tol": exact_tol if exact_tol is not None else 1.0e-9,
+        }
+
     def _validate_inputs(self):
         from tkinter import messagebox
+
+        source_mode_var = getattr(self, "source_mode_var", None)
+        if source_mode_var is not None and source_mode_var.get() == "cache":
+            return self._validate_cache_inputs()
 
         odb_path = self.odb_var.get().strip()
         if not odb_path:
@@ -1572,12 +1901,21 @@ class ExtractOdbApp(object):
     def _run_worker(self, options):
         from tkinter import messagebox
 
+        cache_mode = options.get("source_mode") == "cache"
         try:
-            code = run_workflow(
-                verbose=False,
-                log_callback=self._thread_log,
-                **options
-            )
+            if cache_mode:
+                cache_options = dict(options)
+                cache_options.pop("source_mode", None)
+                code = run_cached_point_query(
+                    log_callback=self._thread_log,
+                    **cache_options
+                )
+            else:
+                code = run_workflow(
+                    verbose=False,
+                    log_callback=self._thread_log,
+                    **options
+                )
         except Exception as exc:
             self.root.after(0, self._set_running, False)
             self.root.after(0, self.log, "ERROR: {}".format(exc))
@@ -1587,10 +1925,16 @@ class ExtractOdbApp(object):
         def finish():
             self._set_running(False)
             if code == 0:
-                self.log(UI_TEXT["extraction_finished_log"])
+                self.log(
+                    UI_TEXT["cache_query_finished"]
+                    if cache_mode
+                    else UI_TEXT["extraction_finished_log"]
+                )
                 messagebox.showinfo(
                     UI_TEXT["extraction_finished_title"],
-                    UI_TEXT["extraction_finished_message"],
+                    UI_TEXT["cache_query_finished"]
+                    if cache_mode
+                    else UI_TEXT["extraction_finished_message"],
                 )
             else:
                 self.log(UI_TEXT["extraction_exit_code_log"].format(code=code))

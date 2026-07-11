@@ -22,7 +22,7 @@ DEFAULT_OUTPUT = os.path.join("output", "test1_point_data.npz")
 DEFAULT_METADATA = os.path.join("output", "test1_point_metadata.json")
 DEFAULT_FIELDS = ("U", "UR", "V", "VR", "A", "AR")
 TOOL_NAME = "odb_extract.extractor"
-METADATA_SCHEMA_VERSION = 2
+METADATA_SCHEMA_VERSION = 3
 
 NodeRef = namedtuple("NodeRef", ["instance_name", "label", "coordinates"])
 
@@ -231,6 +231,30 @@ def _node_set_members(nset):
         instance_name = getattr(item, "instanceName", "")
         for node in item:
             yield getattr(node, "instanceName", instance_name), int(node.label)
+
+
+def build_node_set_arrays(odb, nodes):
+    """Build compact node-set membership arrays for the cached node order."""
+    np = _numpy()
+    node_indexes = {
+        (node.instance_name, int(node.label)): index for index, node in enumerate(nodes)
+    }
+    arrays = {}
+    metadata = {}
+    for name in sorted(odb.rootAssembly.nodeSets.keys()):
+        indexes = sorted(
+            set(
+                node_indexes[member]
+                for member in _node_set_members(odb.rootAssembly.nodeSets[name])
+                if member in node_indexes
+            )
+        )
+        if not indexes:
+            continue
+        key = "node_set_{:04d}_indices".format(len(metadata))
+        arrays[key] = np.asarray(indexes, dtype=np.int64)
+        metadata[name] = {"indices_key": key, "member_count": len(indexes)}
+    return arrays, metadata
 
 
 def choose_step_name(odb, requested_step=None):
@@ -799,6 +823,7 @@ def build_metadata(
     extraction_metadata,
     filters=None,
     command_options=None,
+    node_sets=None,
 ):
     metadata = {
         "tool": {
@@ -823,6 +848,7 @@ def build_metadata(
         "field_outputs": extraction_metadata.get("field_outputs", {}),
         "filters": filters or {},
         "command_options": dict(command_options or {}),
+        "node_sets": dict(node_sets or {}),
         "warnings": extraction_metadata["warnings"],
     }
     return metadata
@@ -872,6 +898,11 @@ def run(args):
             frequency_max=args.frequency_max,
         )
         stage_start = _log_elapsed("extract field arrays", stage_start)
+        node_set_arrays, node_set_metadata = build_node_set_arrays(odb, nodes)
+        arrays.update(node_set_arrays)
+        for key, values in node_set_arrays.items():
+            extraction_metadata["array_shapes"][key] = list(values.shape)
+            extraction_metadata["array_layouts"][key] = ["node_set_member"]
         memmap_files = extraction_metadata.get("_memmap_files", [])
         filters = {
             "instances": list(args.instances or []),
@@ -901,6 +932,7 @@ def run(args):
             extraction_metadata,
             filters=filters,
             command_options=command_options,
+            node_sets=node_set_metadata,
         )
         extraction_metadata["warnings"].extend(node_set_warnings)
         stage_start = _log_elapsed("build metadata", stage_start)

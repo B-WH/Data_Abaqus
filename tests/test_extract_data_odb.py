@@ -787,10 +787,40 @@ class ExtractorTests(unittest.TestCase):
         )
 
         self.assertEqual(metadata["tool"]["name"], "odb_extract.extractor")
-        self.assertEqual(metadata["tool"]["metadata_schema_version"], 2)
+        self.assertEqual(metadata["tool"]["metadata_schema_version"], 3)
         self.assertEqual(metadata["command_options"]["fields"], ["U"])
         self.assertEqual(metadata["command_options"]["frequency_min"], 5.0)
         self.assertEqual(metadata["command_options"]["frequency_max"], 50.0)
+
+    def test_build_node_set_arrays_uses_sorted_cached_node_indices(self):
+        cached_nodes = [
+            extractor.NodeRef("PART-1-1", 1, (0.0, 0.0, 0.0)),
+            extractor.NodeRef("PART-1-1", 2, (1.0, 0.0, 0.0)),
+        ]
+        node_1 = type("Node", (), {"instanceName": "PART-1-1", "label": 1})()
+        node_2 = type("Node", (), {"instanceName": "PART-1-1", "label": 2})()
+        uncached = type("Node", (), {"instanceName": "PART-1-1", "label": 99})()
+        assembly = type(
+            "Assembly",
+            (),
+            {
+                "nodeSets": {
+                    "SET_B": type("NodeSet", (), {"nodes": [node_2, node_2, uncached]})(),
+                    "SET_A": type("NodeSet", (), {"nodes": [node_1]})(),
+                    "SET_EMPTY": type("NodeSet", (), {"nodes": [uncached]})(),
+                }
+            },
+        )()
+        odb = type("Odb", (), {"rootAssembly": assembly})()
+
+        arrays, metadata = extractor.build_node_set_arrays(odb, cached_nodes)
+
+        self.assertEqual(metadata["SET_A"]["indices_key"], "node_set_0000_indices")
+        self.assertEqual(metadata["SET_B"]["indices_key"], "node_set_0001_indices")
+        self.assertNotIn("SET_EMPTY", metadata)
+        np.testing.assert_array_equal(arrays["node_set_0000_indices"], [0])
+        np.testing.assert_array_equal(arrays["node_set_0001_indices"], [1])
+        self.assertEqual(metadata["SET_B"]["member_count"], 1)
 
     def test_node_sets_argument_parsing(self):
         from odb_extract.extractor import parse_args

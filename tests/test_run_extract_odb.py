@@ -18,6 +18,48 @@ class LauncherTests(unittest.TestCase):
         def get(self):
             return self.value
 
+        def set(self, value):
+            self.value = value
+
+    def _write_cache_source(self, name="cache-source"):
+        directory = self._cache_validator_test_dir(name)
+        data_path = os.path.join(directory, "model_point_data.npz")
+        metadata_path = os.path.join(directory, "model_point_metadata.json")
+        np.savez_compressed(
+            data_path,
+            frequencies=np.array([5.0]),
+            node_labels=np.array([1]),
+            node_coordinates=np.array([[0.0, 0.0, 0.0]]),
+            U_real=np.array([[[1.0]]]),
+            U_imag=np.array([[[0.0]]]),
+            node_set_0000_indices=np.array([0], dtype=np.int64),
+        )
+        metadata = {
+            "fields": ["U"],
+            "nodes": [{"instance": "PART-1-1", "label": 1}],
+            "array_shapes": {
+                "frequencies": [1],
+                "node_labels": [1],
+                "node_coordinates": [1, 3],
+                "U_real": [1, 1, 1],
+                "U_imag": [1, 1, 1],
+                "node_set_0000_indices": [1],
+            },
+            "field_outputs": {
+                "U": {
+                    "location": "NODE",
+                    "components": ["U1"],
+                    "points": [{"instance": "PART-1-1", "node_label": 1}],
+                }
+            },
+            "node_sets": {
+                "SET_A": {"indices_key": "node_set_0000_indices", "member_count": 1}
+            },
+        }
+        with open(metadata_path, "w", encoding="utf-8") as stream:
+            json.dump(metadata, stream)
+        return data_path, metadata_path
+
     def _write_full_cache_metadata(self, path, odb_path, array_shapes):
         metadata = {
             "source_odb": os.path.abspath(odb_path),
@@ -68,6 +110,13 @@ class LauncherTests(unittest.TestCase):
 
         self.assertIn('UI_TEXT["keep_full_cache"]', build_source)
         self.assertIn("self.keep_full_cache_var", build_source)
+
+    def test_build_widgets_has_explicit_cache_source_controls(self):
+        build_source = inspect.getsource(launcher.ExtractOdbApp._build_widgets)
+
+        self.assertIn("self.source_mode_var", build_source)
+        self.assertIn('UI_TEXT["cache_file"]', build_source)
+        self.assertIn("self.choose_cache", build_source)
 
     def test_build_widgets_does_not_expose_metadata_path(self):
         build_source = inspect.getsource(launcher.ExtractOdbApp._build_widgets)
@@ -524,6 +573,52 @@ class LauncherTests(unittest.TestCase):
 
         self.assertEqual(data_path, r"D:\results\model_full_field_data.npz")
         self.assertEqual(metadata_path, r"D:\results\model_full_field_metadata.json")
+
+    def test_default_cache_query_output_uses_point_file_name_in_cache_directory(self):
+        output_path = launcher.default_cache_query_output_path(
+            r"D:\cache\model_full_field_data.npz",
+            r"D:\queries\surface.csv",
+        )
+
+        self.assertEqual(output_path, r"D:\cache\surface_point_data.npz")
+
+    def test_load_cache_source_returns_node_fields_and_node_sets(self):
+        data_path, metadata_path = self._write_cache_source("load-cache-source")
+
+        source = launcher.load_cache_source(data_path)
+
+        self.assertEqual(source["metadata_path"], metadata_path)
+        self.assertEqual(source["fields"], ["U"])
+        self.assertEqual(source["node_sets"], ["SET_A"])
+
+    def test_load_cache_source_rejects_invalid_node_set_index(self):
+        data_path, _metadata_path = self._write_cache_source("bad-cache-node-set")
+        with np.load(data_path) as source:
+            arrays = {key: source[key] for key in source.files}
+        arrays["node_set_0000_indices"] = np.array([9], dtype=np.int64)
+        np.savez_compressed(data_path, **arrays)
+
+        with self.assertRaisesRegex(ValueError, "SET_A"):
+            launcher.load_cache_source(data_path)
+
+    def test_run_cached_point_query_calls_only_point_runner(self):
+        calls = []
+
+        code = launcher.run_cached_point_query(
+            data_path="cache.npz",
+            metadata_path="cache_metadata.json",
+            points_path="points.csv",
+            output_path="points_point_data.npz",
+            metadata_output_path="points_point_metadata.json",
+            fields=["U"],
+            node_sets=["SET_A"],
+            point_runner=lambda **kwargs: calls.append(kwargs),
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["data_path"], "cache.npz")
+        self.assertEqual(calls[0]["node_sets"], ["SET_A"])
 
     def test_full_cache_is_invalid_when_selected_fields_change(self):
         metadata = {
@@ -999,6 +1094,43 @@ class LauncherTests(unittest.TestCase):
         options = app._validate_inputs()
 
         self.assertTrue(options["keep_full_cache"])
+
+    def test_validate_inputs_accepts_cache_mode_without_odb_or_abaqus(self):
+        data_path, metadata_path = self._write_cache_source("validate-cache-mode")
+        app = launcher.ExtractOdbApp.__new__(launcher.ExtractOdbApp)
+        app.source_mode_var = self.FakeVar("cache")
+        app.cache_var = self.FakeVar(data_path)
+        app.output_var = self.FakeVar(os.path.join(os.path.dirname(data_path), "query.npz"))
+        app.points_var = self.FakeVar("points.csv")
+        app.neighbors_var = self.FakeVar("4")
+        app.exact_tol_var = self.FakeVar("1e-9")
+        app.field_vars = {"U": self.FakeVar(True)}
+        app.node_sets_var = self.FakeVar("SET_A")
+
+        options = app._validate_inputs()
+
+        self.assertEqual(options["source_mode"], "cache")
+        self.assertEqual(options["data_path"], data_path)
+        self.assertEqual(options["metadata_path"], metadata_path)
+        self.assertEqual(options["node_sets"], ["SET_A"])
+
+    def test_validate_inputs_rejects_cache_output_overwriting_source(self):
+        data_path, _metadata_path = self._write_cache_source("reject-cache-overwrite")
+        app = launcher.ExtractOdbApp.__new__(launcher.ExtractOdbApp)
+        app.source_mode_var = self.FakeVar("cache")
+        app.cache_var = self.FakeVar(data_path)
+        app.output_var = self.FakeVar(data_path)
+        app.points_var = self.FakeVar("points.csv")
+        app.neighbors_var = self.FakeVar("4")
+        app.exact_tol_var = self.FakeVar("1e-9")
+        app.field_vars = {"U": self.FakeVar(True)}
+        app.node_sets_var = self.FakeVar("")
+
+        with mock.patch("tkinter.messagebox.showerror") as showerror:
+            options = app._validate_inputs()
+
+        self.assertIsNone(options)
+        self.assertTrue(showerror.called)
 
     def test_main_without_arguments_runs_gui(self):
         calls = []

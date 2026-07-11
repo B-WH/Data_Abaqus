@@ -52,6 +52,9 @@ class InterpolateOdbPointsTests(unittest.TestCase):
             V_imag=np.array([[[0.0], [0.0], [0.0], [0.0]]]),
             S_real=np.array([[[7.0]]]),
             S_imag=np.array([[[0.0]]]),
+            node_set_0000_indices=np.array([0], dtype=np.int64),
+            node_set_0001_indices=np.array([1], dtype=np.int64),
+            node_set_0002_indices=np.array([2], dtype=np.int64),
         )
         metadata = {
             "fields": ["U", "V", "S"],
@@ -99,6 +102,11 @@ class InterpolateOdbPointsTests(unittest.TestCase):
                     "components": ["S11"],
                     "points": [{"instance": "PART-1-1", "element_label": 1}],
                 },
+            },
+            "node_sets": {
+                "SET_ORIGIN": {"indices_key": "node_set_0000_indices", "member_count": 1},
+                "SET_RIGHT": {"indices_key": "node_set_0001_indices", "member_count": 1},
+                "SET_UP": {"indices_key": "node_set_0002_indices", "member_count": 1},
             },
         }
         with open(self.metadata_path, "w", encoding="utf-8") as stream:
@@ -327,6 +335,67 @@ class InterpolateOdbPointsTests(unittest.TestCase):
         self.assertNotIn("S_real", data.files)
         self.assertEqual(float(data["U_real"][0, 0, 0]), 10.0)
         self.assertEqual(float(data["V_real"][0, 0, 0]), 100.0)
+
+    def test_node_set_limits_interpolation_candidates(self):
+        self._write_points([{"point_id": "p1", "x": "1.0", "y": "0.0", "z": "0.0"}])
+
+        metadata = interp.interpolate_files(
+            data_path=self.data_path,
+            metadata_path=self.metadata_path,
+            points_path=self.points_path,
+            output_path=self.output_path,
+            metadata_output_path=self.metadata_output_path,
+            fields=["U"],
+            node_sets=["SET_ORIGIN"],
+            neighbors=1,
+        )
+
+        data, _saved_metadata = self._read_outputs()
+        self.assertEqual(float(data["U_real"][0, 0, 0]), 10.0)
+        self.assertEqual(metadata["points"][0]["neighbor_labels"], [1])
+        self.assertEqual(metadata["interpolation"]["node_sets"], ["SET_ORIGIN"])
+
+    def test_multiple_node_sets_use_union_of_members(self):
+        self._write_points([{"point_id": "p1", "x": "0.5", "y": "0.5", "z": "0.0"}])
+
+        metadata = interp.interpolate_files(
+            data_path=self.data_path,
+            metadata_path=self.metadata_path,
+            points_path=self.points_path,
+            output_path=self.output_path,
+            metadata_output_path=self.metadata_output_path,
+            fields=["U"],
+            node_sets=["SET_RIGHT", "SET_UP"],
+            neighbors=2,
+        )
+
+        self.assertEqual(metadata["points"][0]["neighbor_labels"], [2, 3])
+
+    def test_node_set_rejects_out_of_range_cached_index(self):
+        with np.load(self.data_path) as source:
+            arrays = {key: source[key] for key in source.files}
+        arrays["node_set_0003_indices"] = np.array([99], dtype=np.int64)
+        np.savez_compressed(self.data_path, **arrays)
+        with open(self.metadata_path, "r", encoding="utf-8") as stream:
+            metadata = json.load(stream)
+        metadata["node_sets"]["SET_BAD"] = {
+            "indices_key": "node_set_0003_indices",
+            "member_count": 1,
+        }
+        with open(self.metadata_path, "w", encoding="utf-8") as stream:
+            json.dump(metadata, stream)
+        self._write_points([{"point_id": "p1", "x": "0", "y": "0", "z": "0"}])
+
+        with self.assertRaisesRegex(ValueError, "SET_BAD"):
+            interp.interpolate_files(
+                data_path=self.data_path,
+                metadata_path=self.metadata_path,
+                points_path=self.points_path,
+                output_path=self.output_path,
+                metadata_output_path=self.metadata_output_path,
+                fields=["U"],
+                node_sets=["SET_BAD"],
+            )
 
     def test_xlsx_points_input_writes_same_npz_contract(self):
         self._write_xlsx_points([{"point_id": "p1", "x": 1.0, "y": 0.0, "z": 0.0}])
