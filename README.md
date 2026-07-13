@@ -124,14 +124,14 @@ metadata JSON 中的 `points[].method` 表示取值方式：
 ## 合并多个频率段结果
 
 如果同一模型分多个 ODB 计算不同频率段，例如 `1-100 Hz`、`100-200 Hz`、
-`200-300 Hz`，先分别导出默认配对文件：
+`200-300 Hz`，先分别导出 NPZ 和配套 metadata JSON。程序按以下规则自动配对：
 
-- `*_point_data.npz`
-- `*_point_metadata.json`
+- `*_data.npz` 对应同目录的 `*_metadata.json`，例如
+  `j-test_100_data.npz` 对应 `j-test_100_metadata.json`；
+- 其他 `任意名称.npz` 对应同目录的 `任意名称.json`。
 
-然后在 GUI 主窗口点击 `合并结果`，选择多个 `*_point_data.npz`，程序会按同目录
-默认命名自动查找 `*_point_metadata.json`。合并只读取已导出的 NPZ/JSON，不重新打开
-ODB。
+然后在 GUI 主窗口点击 `合并结果`，选择多个 NPZ 文件。合并只读取已导出的
+NPZ/JSON，不重新打开 ODB。
 
 命令行也可以直接运行：
 

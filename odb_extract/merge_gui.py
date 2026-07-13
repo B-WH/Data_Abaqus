@@ -28,7 +28,7 @@ UI_TEXT = {
     "merge_finished_message": "频率段结果合并完成。",
     "merge_finished_log": "合并完成：{output}",
     "merge_failed_title": "合并失败",
-    "merge_input_count_error": "请至少选择两个 *_point_data.npz 文件。",
+    "merge_input_count_error": "请至少选择两个 NPZ 文件。",
     "merge_output_missing_error": "请设置合并 NPZ 和元数据 JSON 输出路径。",
     "merge_metadata_missing_error": "找不到配套元数据文件：{path}",
     "merge_invalid_tolerance_error": "重复频率容差必须是正数，或留空使用默认值。",

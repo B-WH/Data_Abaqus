@@ -1,4 +1,4 @@
-"""Merge exported Abaqus ODB point-data NPZ files across frequency bands."""
+"""Merge exported Abaqus ODB NPZ files across frequency bands."""
 
 from __future__ import print_function
 
@@ -112,9 +112,9 @@ def merge_parts(parts, duplicate_frequency_tolerance=FREQUENCY_ATOL):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Merge exported Abaqus ODB *_point_data.npz files by frequency."
+        description="Merge exported Abaqus ODB NPZ files by frequency."
     )
-    parser.add_argument("--input", nargs="+", required=True, help="Input *_point_data.npz files.")
+    parser.add_argument("--input", nargs="+", required=True, help="Input NPZ files.")
     parser.add_argument("--output", required=True, help="Merged output NPZ path.")
     parser.add_argument("--metadata-output", required=True, help="Merged metadata JSON path.")
     parser.add_argument(
