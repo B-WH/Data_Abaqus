@@ -639,6 +639,33 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(calls[0]["node_sets"], ["SET_A"])
         self.assertNotIn("points_path", calls[0])
 
+    def test_run_cached_point_query_preserves_legacy_positional_signature(self):
+        calls = []
+        logs = []
+
+        code = launcher.run_cached_point_query(
+            "cache.npz",
+            "cache_metadata.json",
+            "points.csv",
+            "points_point_data.npz",
+            "points_point_metadata.json",
+            ["U"],
+            ["SET_A"],
+            6,
+            1.0e-8,
+            lambda **kwargs: calls.append(kwargs),
+            logs.append,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["points_path"], "points.csv")
+        self.assertEqual(calls[0]["output_path"], "points_point_data.npz")
+        self.assertEqual(calls[0]["fields"], ["U"])
+        self.assertEqual(calls[0]["neighbors"], 6)
+        self.assertEqual(calls[0]["exact_tol"], 1.0e-8)
+        self.assertEqual(logs, [launcher.UI_TEXT["starting_cache_query"]])
+
     def test_full_cache_is_invalid_when_selected_fields_change(self):
         metadata = {
             "source_odb": os.path.abspath("model.odb"),

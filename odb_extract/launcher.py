@@ -783,7 +783,32 @@ def run_cached_query(
     return 0
 
 
-run_cached_point_query = run_cached_query
+def run_cached_point_query(
+    data_path,
+    metadata_path,
+    points_path,
+    output_path,
+    metadata_output_path,
+    fields,
+    node_sets=None,
+    neighbors=4,
+    exact_tol=1.0e-9,
+    point_runner=None,
+    log_callback=None,
+):
+    return run_cached_query(
+        data_path=data_path,
+        metadata_path=metadata_path,
+        points_path=points_path,
+        output_path=output_path,
+        metadata_output_path=metadata_output_path,
+        fields=fields,
+        node_sets=node_sets,
+        neighbors=neighbors,
+        exact_tol=exact_tol,
+        point_runner=point_runner,
+        log_callback=log_callback,
+    )
 
 
 def _missing_file_paths(paths):
