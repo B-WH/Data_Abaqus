@@ -336,6 +336,58 @@ class InterpolateOdbPointsTests(unittest.TestCase):
         self.assertEqual(float(data["U_real"][0, 0, 0]), 10.0)
         self.assertEqual(float(data["V_real"][0, 0, 0]), 100.0)
 
+    def test_subset_node_sets_preserves_values_order_fields_and_membership(self):
+        with np.load(self.data_path) as source:
+            arrays = {key: source[key] for key in source.files}
+        arrays["node_set_0003_indices"] = np.array([1, 2], dtype=np.int64)
+        np.savez_compressed(self.data_path, **arrays)
+        with open(self.metadata_path, "r", encoding="utf-8") as stream:
+            source_metadata = json.load(stream)
+        source_metadata["node_sets"]["SET_RIGHT_UP"] = {
+            "indices_key": "node_set_0003_indices",
+            "member_count": 2,
+        }
+        with open(self.metadata_path, "w", encoding="utf-8") as stream:
+            json.dump(source_metadata, stream)
+
+        metadata = interp.subset_node_sets_files(
+            data_path=self.data_path,
+            metadata_path=self.metadata_path,
+            output_path=self.output_path,
+            metadata_output_path=self.metadata_output_path,
+            fields=["U"],
+            node_sets=["SET_UP", "SET_RIGHT_UP"],
+        )
+
+        with np.load(self.output_path) as data:
+            self.assertEqual(data["frequencies"].tolist(), [5.0])
+            self.assertEqual(data["node_labels"].tolist(), [2, 3])
+            self.assertEqual(
+                data["node_coordinates"].tolist(),
+                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            )
+            np.testing.assert_array_equal(data["U_real"], [[[20.0], [30.0]]])
+            np.testing.assert_array_equal(data["U_imag"], [[[2.0], [3.0]]])
+            self.assertNotIn("V_real", data.files)
+            up_key = metadata["node_sets"]["SET_UP"]["indices_key"]
+            right_up_key = metadata["node_sets"]["SET_RIGHT_UP"]["indices_key"]
+            self.assertEqual(data[up_key].tolist(), [1])
+            self.assertEqual(data[right_up_key].tolist(), [0, 1])
+
+        self.assertEqual(metadata["fields"], ["U"])
+        self.assertEqual([node["label"] for node in metadata["nodes"]], [2, 3])
+        self.assertEqual(
+            [
+                point["node_label"]
+                for point in metadata["field_outputs"]["U"]["points"]
+            ],
+            [2, 3],
+        )
+        self.assertEqual(metadata["array_shapes"]["U_real"], [1, 2, 1])
+        self.assertEqual(
+            metadata["filters"]["node_sets"], ["SET_UP", "SET_RIGHT_UP"]
+        )
+
     def test_node_set_limits_interpolation_candidates(self):
         self._write_points([{"point_id": "p1", "x": "1.0", "y": "0.0", "z": "0.0"}])
 

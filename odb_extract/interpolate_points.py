@@ -3,6 +3,7 @@
 from __future__ import print_function
 
 import argparse
+import copy
 import csv
 import json
 import os
@@ -359,6 +360,180 @@ def _build_point_arrays(
         }
 
     return arrays, point_records, field_outputs
+
+
+def subset_node_sets_files(
+    data_path,
+    metadata_path,
+    output_path,
+    metadata_output_path,
+    fields=None,
+    node_sets=None,
+):
+    source_metadata = load_metadata(metadata_path)
+    requested_fields = list(
+        fields if fields is not None else _available_node_fields(source_metadata)
+    )
+    selected_set_names = []
+    for name in node_sets or []:
+        if name not in selected_set_names:
+            selected_set_names.append(name)
+    if not selected_set_names:
+        raise ValueError("At least one cached node set is required.")
+    if not requested_fields:
+        raise ValueError("At least one cached node field is required.")
+
+    nodes = source_metadata.get("nodes") or []
+    source_layouts = source_metadata.get("array_layouts") or {}
+    field_metadata_by_name = {
+        field_name: _validate_field(source_metadata, field_name)
+        for field_name in requested_fields
+    }
+
+    with np.load(data_path) as data:
+        allowed_node_keys = _selected_node_keys(
+            data, source_metadata, selected_set_names
+        )
+        selected_node_indexes = np.asarray(
+            [
+                index
+                for index, node in enumerate(nodes)
+                if (node.get("instance", ""), int(node.get("label")))
+                in allowed_node_keys
+            ],
+            dtype=np.int64,
+        )
+        if not len(selected_node_indexes):
+            raise ValueError("Selected cached node sets contain no nodes.")
+
+        required_arrays = ("frequencies", "node_labels", "node_coordinates")
+        missing = [name for name in required_arrays if name not in data]
+        if missing:
+            raise ValueError("Cache is missing array(s): {}".format(", ".join(missing)))
+        node_labels = np.asarray(data["node_labels"])
+        node_coordinates = np.asarray(data["node_coordinates"])
+        if node_labels.shape != (len(nodes),) or node_coordinates.shape != (
+            len(nodes),
+            3,
+        ):
+            raise ValueError("Cached node arrays do not match metadata nodes.")
+
+        arrays = {
+            "frequencies": np.asarray(data["frequencies"]),
+            "node_labels": node_labels[selected_node_indexes],
+            "node_coordinates": node_coordinates[selected_node_indexes],
+        }
+        array_layouts = {
+            "frequencies": list(source_layouts.get("frequencies") or ["frame"]),
+            "node_labels": list(source_layouts.get("node_labels") or ["node"]),
+            "node_coordinates": list(
+                source_layouts.get("node_coordinates") or ["node", "coordinate"]
+            ),
+        }
+        field_outputs = {}
+
+        for field_name in requested_fields:
+            field_metadata = field_metadata_by_name[field_name]
+            points = field_metadata.get("points") or []
+            field_indexes = np.asarray(
+                [
+                    index
+                    for index, point in enumerate(points)
+                    if (
+                        point.get("instance", ""),
+                        int(point.get("node_label")),
+                    )
+                    in allowed_node_keys
+                ],
+                dtype=np.int64,
+            )
+            if not len(field_indexes):
+                raise ValueError(
+                    "Field {} has no points in the selected node sets.".format(
+                        field_name
+                    )
+                )
+            for suffix in ("real", "imag"):
+                key = "{}_{}".format(field_name, suffix)
+                if key not in data:
+                    raise ValueError("Cache is missing array {}.".format(key))
+                values = np.asarray(data[key])
+                if values.ndim != 3 or values.shape[1] != len(points):
+                    raise ValueError(
+                        "Cached field {} does not match metadata points.".format(
+                            field_name
+                        )
+                    )
+                arrays[key] = values[:, field_indexes, :]
+                array_layouts[key] = list(
+                    source_layouts.get(key)
+                    or field_metadata.get("array_layout")
+                    or ["frame", "node", "component"]
+                )
+            output_field_metadata = copy.deepcopy(field_metadata)
+            output_field_metadata["points"] = [
+                copy.deepcopy(points[int(index)]) for index in field_indexes
+            ]
+            field_outputs[field_name] = output_field_metadata
+
+        old_to_new = {
+            int(source_index): output_index
+            for output_index, source_index in enumerate(selected_node_indexes.tolist())
+        }
+        node_set_metadata = {}
+        definitions = source_metadata.get("node_sets") or {}
+        for output_set_index, name in enumerate(selected_set_names):
+            source_key = definitions[name]["indices_key"]
+            output_key = "node_set_{:04d}_indices".format(output_set_index)
+            output_indexes = np.asarray(
+                [
+                    old_to_new[int(index)]
+                    for index in np.asarray(data[source_key]).tolist()
+                    if int(index) in old_to_new
+                ],
+                dtype=np.int64,
+            )
+            arrays[output_key] = output_indexes
+            array_layouts[output_key] = ["node_set_member"]
+            node_set_metadata[name] = {
+                "indices_key": output_key,
+                "member_count": len(output_indexes),
+            }
+
+    metadata = copy.deepcopy(source_metadata)
+    metadata["source_data"] = os.path.abspath(data_path)
+    metadata["source_metadata"] = os.path.abspath(metadata_path)
+    metadata["fields"] = requested_fields
+    metadata["node_count"] = len(selected_node_indexes)
+    metadata["nodes"] = [
+        copy.deepcopy(nodes[int(index)]) for index in selected_node_indexes
+    ]
+    metadata["array_shapes"] = {
+        name: list(values.shape) for name, values in arrays.items()
+    }
+    metadata["array_layouts"] = array_layouts
+    metadata["field_outputs"] = field_outputs
+    metadata["node_sets"] = node_set_metadata
+    metadata["filters"] = dict(metadata.get("filters") or {})
+    metadata["filters"]["node_sets"] = selected_set_names
+    metadata["command_options"] = dict(metadata.get("command_options") or {})
+    metadata["command_options"].update(
+        {
+            "fields": requested_fields,
+            "node_sets": selected_set_names,
+            "output": os.path.abspath(output_path),
+            "metadata": os.path.abspath(metadata_output_path),
+        }
+    )
+    metadata["cache_subset"] = {
+        "source_data": os.path.abspath(data_path),
+        "source_metadata": os.path.abspath(metadata_path),
+        "fields": requested_fields,
+        "node_sets": selected_set_names,
+    }
+    _save_npz(output_path, arrays)
+    _save_metadata(metadata_output_path, metadata)
+    return metadata
 
 
 def interpolate_files(
