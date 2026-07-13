@@ -783,6 +783,9 @@ def run_cached_query(
     return 0
 
 
+run_cached_point_query = run_cached_query
+
+
 def _missing_file_paths(paths):
     return [path for path in paths if path and not os.path.isfile(path)]
 

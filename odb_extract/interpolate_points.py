@@ -8,6 +8,7 @@ import csv
 import json
 import os
 import sys
+import tempfile
 
 import numpy as np
 
@@ -44,6 +45,30 @@ def ensure_parent_dir(path):
     parent = os.path.dirname(os.path.abspath(path))
     if parent and not os.path.isdir(parent):
         os.makedirs(parent)
+
+
+def _same_file_path(first, second):
+    if os.path.normcase(os.path.abspath(first)) == os.path.normcase(
+        os.path.abspath(second)
+    ):
+        return True
+    return os.path.exists(first) and os.path.exists(second) and os.path.samefile(
+        first, second
+    )
+
+
+def _validate_subset_paths(
+    data_path, metadata_path, output_path, metadata_output_path
+):
+    pairs = (
+        (output_path, data_path),
+        (output_path, metadata_path),
+        (metadata_output_path, data_path),
+        (metadata_output_path, metadata_path),
+        (output_path, metadata_output_path),
+    )
+    if any(_same_file_path(first, second) for first, second in pairs):
+        raise ValueError("Source and output paths must be different.")
 
 
 def _point_id_text(value, fallback):
@@ -275,6 +300,35 @@ def _save_metadata(output_path, metadata):
         json.dump(metadata, stream, ensure_ascii=False, indent=2, sort_keys=True)
 
 
+def _temporary_sibling(path, suffix):
+    ensure_parent_dir(path)
+    file_descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".odb_extract_",
+        suffix=suffix,
+        dir=os.path.dirname(os.path.abspath(path)),
+    )
+    os.close(file_descriptor)
+    return temporary_path
+
+
+def _save_output_pair(output_path, arrays, metadata_output_path, metadata):
+    temporary_data_path = _temporary_sibling(output_path, ".npz")
+    temporary_metadata_path = None
+    try:
+        temporary_metadata_path = _temporary_sibling(metadata_output_path, ".json")
+        _save_npz(temporary_data_path, arrays)
+        _save_metadata(temporary_metadata_path, metadata)
+        os.replace(temporary_data_path, output_path)
+        temporary_data_path = None
+        os.replace(temporary_metadata_path, metadata_output_path)
+        temporary_metadata_path = None
+    finally:
+        if temporary_data_path and os.path.isfile(temporary_data_path):
+            os.remove(temporary_data_path)
+        if temporary_metadata_path and os.path.isfile(temporary_metadata_path):
+            os.remove(temporary_metadata_path)
+
+
 def _build_point_arrays(
     data,
     metadata,
@@ -370,6 +424,9 @@ def subset_node_sets_files(
     fields=None,
     node_sets=None,
 ):
+    _validate_subset_paths(
+        data_path, metadata_path, output_path, metadata_output_path
+    )
     source_metadata = load_metadata(metadata_path)
     requested_fields = list(
         fields if fields is not None else _available_node_fields(source_metadata)
@@ -385,6 +442,7 @@ def subset_node_sets_files(
 
     nodes = source_metadata.get("nodes") or []
     source_layouts = source_metadata.get("array_layouts") or {}
+    source_shapes = source_metadata.get("array_shapes") or {}
     field_metadata_by_name = {
         field_name: _validate_field(source_metadata, field_name)
         for field_name in requested_fields
@@ -410,16 +468,28 @@ def subset_node_sets_files(
         missing = [name for name in required_arrays if name not in data]
         if missing:
             raise ValueError("Cache is missing array(s): {}".format(", ".join(missing)))
+        frequencies = np.asarray(data["frequencies"])
         node_labels = np.asarray(data["node_labels"])
         node_coordinates = np.asarray(data["node_coordinates"])
+        if frequencies.ndim != 1:
+            raise ValueError("Cached frequencies must be a one-dimensional array.")
         if node_labels.shape != (len(nodes),) or node_coordinates.shape != (
             len(nodes),
             3,
         ):
             raise ValueError("Cached node arrays do not match metadata nodes.")
+        for key, values in (
+            ("frequencies", frequencies),
+            ("node_labels", node_labels),
+            ("node_coordinates", node_coordinates),
+        ):
+            if key in source_shapes and list(values.shape) != source_shapes[key]:
+                raise ValueError(
+                    "Cached array {} does not match metadata shape.".format(key)
+                )
 
         arrays = {
-            "frequencies": np.asarray(data["frequencies"]),
+            "frequencies": frequencies,
             "node_labels": node_labels[selected_node_indexes],
             "node_coordinates": node_coordinates[selected_node_indexes],
         }
@@ -453,6 +523,7 @@ def subset_node_sets_files(
                         field_name
                     )
                 )
+            source_field_arrays = {}
             for suffix in ("real", "imag"):
                 key = "{}_{}".format(field_name, suffix)
                 if key not in data:
@@ -464,6 +535,41 @@ def subset_node_sets_files(
                             field_name
                         )
                     )
+                if key in source_shapes and list(values.shape) != source_shapes[key]:
+                    raise ValueError(
+                        "Cached array {} does not match metadata shape.".format(key)
+                    )
+                source_field_arrays[suffix] = values
+
+            real_values = source_field_arrays["real"]
+            imag_values = source_field_arrays["imag"]
+            if real_values.shape != imag_values.shape:
+                raise ValueError(
+                    "Cached field {} real and imaginary arrays must have matching shapes.".format(
+                        field_name
+                    )
+                )
+            if real_values.shape[0] != len(frequencies):
+                raise ValueError(
+                    "Cached field {} frame count does not match frequencies.".format(
+                        field_name
+                    )
+                )
+            components = field_metadata.get("components") or []
+            component_count = field_metadata.get("component_count")
+            if component_count is None and components:
+                component_count = len(components)
+            if component_count is not None and real_values.shape[2] != int(
+                component_count
+            ):
+                raise ValueError(
+                    "Cached field {} component count does not match metadata.".format(
+                        field_name
+                    )
+                )
+
+            for suffix, values in source_field_arrays.items():
+                key = "{}_{}".format(field_name, suffix)
                 arrays[key] = values[:, field_indexes, :]
                 array_layouts[key] = list(
                     source_layouts.get(key)
@@ -531,8 +637,7 @@ def subset_node_sets_files(
         "fields": requested_fields,
         "node_sets": selected_set_names,
     }
-    _save_npz(output_path, arrays)
-    _save_metadata(metadata_output_path, metadata)
+    _save_output_pair(output_path, arrays, metadata_output_path, metadata)
     return metadata
 
 

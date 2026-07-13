@@ -3,13 +3,14 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 import numpy as np
 from openpyxl import Workbook
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from odb_extract import interpolate_points as interp
+from odb_extract import interpolate_points as interp, launcher
 
 
 class InterpolateOdbPointsTests(unittest.TestCase):
@@ -387,6 +388,59 @@ class InterpolateOdbPointsTests(unittest.TestCase):
         self.assertEqual(
             metadata["filters"]["node_sets"], ["SET_UP", "SET_RIGHT_UP"]
         )
+        reloaded = launcher.load_cache_source(self.output_path)
+        self.assertEqual(reloaded["fields"], ["U"])
+        self.assertEqual(reloaded["node_sets"], ["SET_RIGHT_UP", "SET_UP"])
+
+    def test_subset_node_sets_rejects_source_path_overwrite(self):
+        with self.assertRaisesRegex(ValueError, "must be different"):
+            interp.subset_node_sets_files(
+                data_path=self.data_path,
+                metadata_path=self.metadata_path,
+                output_path=self.data_path,
+                metadata_output_path=self.metadata_output_path,
+                fields=["U"],
+                node_sets=["SET_ORIGIN"],
+            )
+
+    def test_subset_node_sets_rejects_mismatched_field_shapes(self):
+        with np.load(self.data_path) as source:
+            arrays = {key: source[key] for key in source.files}
+        arrays["U_imag"] = np.zeros((2, 4, 1), dtype=float)
+        np.savez_compressed(self.data_path, **arrays)
+
+        with self.assertRaisesRegex(ValueError, "matching shapes"):
+            interp.subset_node_sets_files(
+                data_path=self.data_path,
+                metadata_path=self.metadata_path,
+                output_path=self.output_path,
+                metadata_output_path=self.metadata_output_path,
+                fields=["U"],
+                node_sets=["SET_ORIGIN"],
+            )
+
+    def test_subset_node_sets_preserves_outputs_when_metadata_write_fails(self):
+        np.savez_compressed(self.output_path, sentinel=np.array([7]))
+        with open(self.metadata_output_path, "w", encoding="utf-8") as stream:
+            json.dump({"sentinel": 9}, stream)
+
+        with mock.patch.object(
+            interp, "_save_metadata", side_effect=OSError("metadata write failed")
+        ):
+            with self.assertRaisesRegex(OSError, "metadata write failed"):
+                interp.subset_node_sets_files(
+                    data_path=self.data_path,
+                    metadata_path=self.metadata_path,
+                    output_path=self.output_path,
+                    metadata_output_path=self.metadata_output_path,
+                    fields=["U"],
+                    node_sets=["SET_ORIGIN"],
+                )
+
+        with np.load(self.output_path) as data:
+            self.assertEqual(data["sentinel"].tolist(), [7])
+        with open(self.metadata_output_path, "r", encoding="utf-8") as stream:
+            self.assertEqual(json.load(stream), {"sentinel": 9})
 
     def test_node_set_limits_interpolation_candidates(self):
         self._write_points([{"point_id": "p1", "x": "1.0", "y": "0.0", "z": "0.0"}])
