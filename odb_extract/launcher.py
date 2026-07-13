@@ -1046,9 +1046,11 @@ class ExtractOdbApp(object):
         self.odb_entry, self.odb_browse_button = self._add_path_row(
             frame, 1, UI_TEXT["odb_file"], self.odb_var, self.choose_odb
         )
-        self.cache_entry, self.cache_browse_button = self._add_path_row(
+        self.cache_entry, cache_browse_button = self._add_path_row(
             frame, 2, UI_TEXT["cache_file"], self.cache_var, self.choose_cache
         )
+        assert cache_browse_button is not None
+        self.cache_browse_button = cache_browse_button
         self.output_entry, self.output_browse_button = self._add_path_row(
             frame, 3, UI_TEXT["npz_output"], self.output_var, self.choose_output
         )
