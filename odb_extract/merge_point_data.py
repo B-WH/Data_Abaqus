@@ -16,14 +16,15 @@ VALUE_ATOL = 1.0e-10
 
 
 def infer_metadata_path(data_path):
-    suffix = "_point_data.npz"
+    data_suffix = "_data.npz"
     base_name = os.path.basename(data_path)
-    if not base_name.endswith(suffix):
-        raise ValueError("Input NPZ must use *_point_data.npz naming: {}".format(data_path))
-    return os.path.join(
-        os.path.dirname(data_path),
-        base_name[: -len(suffix)] + "_point_metadata.json",
-    )
+    if base_name.endswith(data_suffix):
+        metadata_name = base_name[: -len(data_suffix)] + "_metadata.json"
+    elif base_name.endswith(".npz"):
+        metadata_name = base_name[:-4] + ".json"
+    else:
+        raise ValueError("Input file must use a .npz extension: {}".format(data_path))
+    return os.path.join(os.path.dirname(data_path), metadata_name)
 
 
 def load_part(data_path, metadata_path=None):

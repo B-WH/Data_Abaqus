@@ -210,11 +210,19 @@ class MergePointDataTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "array_layouts"):
             merge_point_data.merge_parts([first, second])
 
-    def test_infer_metadata_path_uses_default_pair_name(self):
-        self.assertEqual(
-            merge_point_data.infer_metadata_path(r"D:\work\a_point_data.npz"),
-            r"D:\work\a_point_metadata.json",
+    def test_infer_metadata_path_supports_general_npz_names(self):
+        cases = (
+            (r"D:\work\j-test_100_data.npz", r"D:\work\j-test_100_metadata.json"),
+            (r"D:\work\a_point_data.npz", r"D:\work\a_point_metadata.json"),
+            (r"D:\work\band-100.npz", r"D:\work\band-100.json"),
         )
+        for data_path, expected in cases:
+            with self.subTest(data_path=data_path):
+                self.assertEqual(merge_point_data.infer_metadata_path(data_path), expected)
+
+    def test_infer_metadata_path_rejects_non_npz_path(self):
+        with self.assertRaisesRegex(ValueError, "\\.npz"):
+            merge_point_data.infer_metadata_path(r"D:\work\band-100.dat")
 
     def test_validate_output_paths_rejects_data_output_overwriting_input(self):
         with self.assertRaisesRegex(ValueError, "input NPZ"):
