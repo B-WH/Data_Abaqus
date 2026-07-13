@@ -56,11 +56,12 @@ UI_TEXT = {
     "cache_without_node_sets": "此缓存不包含节点集成员信息，将使用全部缓存节点。",
     "invalid_cache_title": "缓存文件无效",
     "missing_cache_message": "请选择兼容的节点数据 NPZ 缓存。",
-    "missing_points_for_cache": "缓存查询必须选择目标点 CSV 或 Excel 文件。",
-    "missing_output_for_cache": "缓存查询必须设置目标点 NPZ 输出路径。",
-    "cache_output_conflict": "缓存查询输出不能覆盖源缓存 NPZ 或配套 metadata。",
+    "missing_cache_selection": "请选择目标点 CSV/Excel 文件，或至少选择一个节点集。",
+    "missing_output_for_cache": "缓存处理必须设置 NPZ 输出路径。",
+    "cache_output_conflict": "缓存输出不能覆盖源缓存 NPZ 或配套 metadata。",
     "starting_cache_query": "开始从缓存查询目标点。",
-    "cache_query_finished": "缓存目标点查询完成。",
+    "starting_cache_subset": "开始从缓存按节点集提取原始节点。",
+    "cache_query_finished": "缓存数据处理完成。",
     "no_fields_found": "未找到场输出。",
     "found_fields": "已在 Step {step} 中找到 {count} 个场输出。",
     "select_odb_first": "请先选择 ODB 文件，再读取场输出。",
@@ -732,35 +733,53 @@ def _default_point_runner(**kwargs):
     return interpolate_points.interpolate_files(**kwargs)
 
 
-def run_cached_point_query(
+def _default_subset_runner(**kwargs):
+    from odb_extract import interpolate_points
+
+    return interpolate_points.subset_node_sets_files(**kwargs)
+
+
+def run_cached_query(
     data_path,
     metadata_path,
-    points_path,
     output_path,
     metadata_output_path,
     fields,
+    points_path=None,
     node_sets=None,
     neighbors=4,
     exact_tol=1.0e-9,
     point_runner=None,
+    subset_runner=None,
     log_callback=None,
 ):
-    if log_callback:
-        log_callback(UI_TEXT["starting_cache_query"])
-    runner = _default_point_runner if point_runner is None else point_runner
-    runner(
-        data_path=data_path,
-        metadata_path=metadata_path,
-        points_path=points_path,
-        output_path=output_path,
-        metadata_output_path=metadata_output_path,
-        fields=fields,
-        node_sets=node_sets,
-        neighbors=neighbors,
-        exact_tol=exact_tol,
-    )
-    if log_callback:
-        log_callback(UI_TEXT["cache_query_finished"])
+    if points_path:
+        if log_callback:
+            log_callback(UI_TEXT["starting_cache_query"])
+        runner = _default_point_runner if point_runner is None else point_runner
+        runner(
+            data_path=data_path,
+            metadata_path=metadata_path,
+            points_path=points_path,
+            output_path=output_path,
+            metadata_output_path=metadata_output_path,
+            fields=fields,
+            node_sets=node_sets,
+            neighbors=neighbors,
+            exact_tol=exact_tol,
+        )
+    else:
+        if log_callback:
+            log_callback(UI_TEXT["starting_cache_subset"])
+        runner = _default_subset_runner if subset_runner is None else subset_runner
+        runner(
+            data_path=data_path,
+            metadata_path=metadata_path,
+            output_path=output_path,
+            metadata_output_path=metadata_output_path,
+            fields=fields,
+            node_sets=node_sets,
+        )
     return 0
 
 
@@ -1729,10 +1748,11 @@ class ExtractOdbApp(object):
         except Exception as exc:
             messagebox.showerror(UI_TEXT["invalid_cache_title"], str(exc))
             return None
-        points_path = self.points_var.get().strip()
-        if not points_path:
+        points_path = self.points_var.get().strip() or None
+        node_sets = parse_node_set_text(self.node_sets_var.get())
+        if not points_path and not node_sets:
             messagebox.showerror(
-                UI_TEXT["invalid_cache_title"], UI_TEXT["missing_points_for_cache"]
+                UI_TEXT["invalid_cache_title"], UI_TEXT["missing_cache_selection"]
             )
             return None
         output_path = self.output_var.get().strip()
@@ -1760,28 +1780,33 @@ class ExtractOdbApp(object):
                 UI_TEXT["invalid_cache_title"], "所选场输出不在缓存中。"
             )
             return None
-        node_sets = parse_node_set_text(self.node_sets_var.get())
         if any(name not in source["node_sets"] for name in (node_sets or [])):
             messagebox.showerror(
                 UI_TEXT["invalid_cache_title"], "所选节点集不在缓存中。"
             )
             return None
-        try:
-            neighbors = int(self.neighbors_var.get().strip() or "4")
-            if neighbors < 1:
-                raise ValueError
-        except ValueError:
-            messagebox.showerror(
-                UI_TEXT["invalid_neighbors_title"], UI_TEXT["invalid_neighbors_message"]
-            )
-            return None
-        try:
-            exact_tol = parse_optional_float(self.exact_tol_var.get())
-        except ValueError:
-            messagebox.showerror(
-                UI_TEXT["invalid_exact_tol_title"], UI_TEXT["invalid_exact_tol_message"]
-            )
-            return None
+        neighbors = 4
+        exact_tol = 1.0e-9
+        if points_path:
+            try:
+                neighbors = int(self.neighbors_var.get().strip() or "4")
+                if neighbors < 1:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror(
+                    UI_TEXT["invalid_neighbors_title"],
+                    UI_TEXT["invalid_neighbors_message"],
+                )
+                return None
+            try:
+                parsed_tol = parse_optional_float(self.exact_tol_var.get())
+            except ValueError:
+                messagebox.showerror(
+                    UI_TEXT["invalid_exact_tol_title"],
+                    UI_TEXT["invalid_exact_tol_message"],
+                )
+                return None
+            exact_tol = parsed_tol if parsed_tol is not None else 1.0e-9
         return {
             "source_mode": "cache",
             "data_path": cache_path,
@@ -1792,7 +1817,7 @@ class ExtractOdbApp(object):
             "fields": fields,
             "node_sets": node_sets,
             "neighbors": neighbors,
-            "exact_tol": exact_tol if exact_tol is not None else 1.0e-9,
+            "exact_tol": exact_tol,
         }
 
     def _validate_inputs(self):
@@ -1908,7 +1933,7 @@ class ExtractOdbApp(object):
             if cache_mode:
                 cache_options = dict(options)
                 cache_options.pop("source_mode", None)
-                code = run_cached_point_query(
+                code = run_cached_query(
                     log_callback=self._thread_log,
                     **cache_options
                 )

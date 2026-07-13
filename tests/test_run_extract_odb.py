@@ -601,10 +601,10 @@ class LauncherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SET_A"):
             launcher.load_cache_source(data_path)
 
-    def test_run_cached_point_query_calls_only_point_runner(self):
+    def test_run_cached_query_dispatches_point_interpolation(self):
         calls = []
 
-        code = launcher.run_cached_point_query(
+        code = launcher.run_cached_query(
             data_path="cache.npz",
             metadata_path="cache_metadata.json",
             points_path="points.csv",
@@ -618,7 +618,26 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["data_path"], "cache.npz")
+        self.assertEqual(calls[0]["points_path"], "points.csv")
         self.assertEqual(calls[0]["node_sets"], ["SET_A"])
+
+    def test_run_cached_query_dispatches_node_set_subset_without_points(self):
+        calls = []
+
+        code = launcher.run_cached_query(
+            data_path="cache.npz",
+            metadata_path="cache_metadata.json",
+            output_path="set_point_data.npz",
+            metadata_output_path="set_point_metadata.json",
+            fields=["U"],
+            node_sets=["SET_A"],
+            subset_runner=lambda **kwargs: calls.append(kwargs),
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["node_sets"], ["SET_A"])
+        self.assertNotIn("points_path", calls[0])
 
     def test_full_cache_is_invalid_when_selected_fields_change(self):
         metadata = {
@@ -1111,6 +1130,29 @@ class LauncherTests(unittest.TestCase):
 
         self.assertEqual(options["source_mode"], "cache")
         self.assertEqual(options["data_path"], data_path)
+        self.assertEqual(options["metadata_path"], metadata_path)
+        self.assertEqual(options["node_sets"], ["SET_A"])
+
+    def test_validate_inputs_accepts_cache_node_set_without_points(self):
+        data_path, metadata_path = self._write_cache_source("cache-node-set-mode")
+        app = launcher.ExtractOdbApp.__new__(launcher.ExtractOdbApp)
+        app.source_mode_var = self.FakeVar("cache")
+        app.cache_var = self.FakeVar(data_path)
+        app.output_var = self.FakeVar(
+            os.path.join(os.path.dirname(data_path), "set_subset_data.npz")
+        )
+        app.points_var = self.FakeVar("")
+        app.neighbors_var = self.FakeVar("not-used")
+        app.exact_tol_var = self.FakeVar("not-used")
+        app.field_vars = {"U": self.FakeVar(True)}
+        app.node_sets_var = self.FakeVar("SET_A")
+
+        with mock.patch("tkinter.messagebox.showerror"):
+            options = app._validate_inputs()
+
+        self.assertIsNotNone(options)
+        self.assertEqual(options["source_mode"], "cache")
+        self.assertIsNone(options["points_path"])
         self.assertEqual(options["metadata_path"], metadata_path)
         self.assertEqual(options["node_sets"], ["SET_A"])
 
