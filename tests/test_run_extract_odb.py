@@ -534,6 +534,16 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(launcher.UI_TEXT["refresh_fields"], "读取场输出")
         self.assertEqual(launcher.UI_TEXT["select_all_fields"], "全选")
         self.assertEqual(launcher.UI_TEXT["clear_all_fields"], "全不选")
+
+    def test_npz_magnitude_export_is_packaged_and_documented(self):
+        with open("Extract_ODB.spec", "r", encoding="utf-8") as stream:
+            spec_source = stream.read()
+        with open("README.md", "r", encoding="utf-8") as stream:
+            readme = stream.read()
+
+        self.assertIn("'odb_extract.npz_export'", spec_source)
+        self.assertIn("### 查看 NPZ 并导出幅值 CSV", readme)
+        self.assertIn("不包含实部、虚部或相位", readme)
         self.assertEqual(
             launcher.UI_TEXT["keep_full_cache"],
             "保留并复用全模型已选场缓存",

@@ -104,7 +104,7 @@ Excel 文件默认读取第一个工作表，不支持旧 `.xls` 格式。
 - `*_point_data.npz`：数值数组，包括频率、节点标签、节点坐标、各字段实部和虚部。
 - `*_point_metadata.json`：字段、节点、坐标、数组布局、过滤条件和 warning 信息。
 
-程序不再导出 CSV。节点集直接提取保持节点场的 `frame,node,component` 布局；目标点插值结果使用 `frame,point,component` 布局。
+ODB 提取和目标点查询流程不直接导出 CSV。节点集直接提取保持节点场的 `frame,node,component` 布局；目标点插值结果使用 `frame,point,component` 布局。
 
 目标点坐标模式也输出同名 NPZ/JSON，其中 NPZ 包含：
 
@@ -117,6 +117,13 @@ metadata JSON 中的 `points[].method` 表示取值方式：
 
 - `exact`：目标点坐标在容差内命中某个节点，直接使用该节点值。
 - `weighted`：未命中节点时，使用邻近节点反距离加权。
+
+### 查看 NPZ 并导出幅值 CSV
+
+主窗口点击“查看/转换 NPZ”，选择本工具生成的 NPZ。程序自动读取配套 metadata，
+显示数组结构和预览，并可按字段、分量、频率及节点、点或单元编号筛选。导出的长表
+CSV 只包含复数结果的幅值 `magnitude = hypot(real, imag)`，不包含实部、虚部或相位。
+数据量超过 Excel 单工作表行数上限时，程序会在写出前提示确认。
 
 `points[]` 还会记录 `neighbor_labels`、`neighbor_weights` 和 `neighbor_distances`；
 `points[].fields[field]` 保留每个输出字段对应的同类取值明细。

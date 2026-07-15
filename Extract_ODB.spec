@@ -11,6 +11,7 @@ a = Analysis(
         'odb_extract.interpolate_points',
         'odb_extract.merge_gui',
         'odb_extract.merge_point_data',
+        'odb_extract.npz_export',
     ],
     hookspath=[],
     hooksconfig={},
