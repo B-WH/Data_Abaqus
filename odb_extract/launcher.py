@@ -42,6 +42,7 @@ UI_TEXT = {
     "refresh_fields": "读取场输出",
     "inspect_odb": "检查 ODB 结构",
     "merge_results": "合并结果",
+    "npz_magnitude_export": "查看/转换 NPZ",
     "available_fields": "可用场输出",
     "field_hint": "请选择 ODB 文件以读取场输出。",
     "run_button": "开始提取",
@@ -1247,6 +1248,12 @@ class ExtractOdbApp(object):
             command=self.open_merge_window,
         )
         self.merge_button.pack(side="left", padx=(8, 0))
+        self.npz_export_button = ttk.Button(
+            button_bar,
+            text=UI_TEXT["npz_magnitude_export"],
+            command=self.open_npz_export_window,
+        )
+        self.npz_export_button.pack(side="left", padx=(8, 0))
         ttk.Label(button_bar, textvariable=self.status_var).pack(side="left", padx=12)
 
         self.log_text = tk.Text(frame, height=12, wrap="word")
@@ -1480,6 +1487,7 @@ class ExtractOdbApp(object):
         self.run_button.configure(state="disabled" if running else "normal")
         self.inspect_button.configure(state="disabled" if running else "normal")
         self.merge_button.configure(state="disabled" if running else "normal")
+        self.npz_export_button.configure(state="disabled" if running else "normal")
         self.refresh_button.configure(state="disabled" if running else "normal")
         for button in self.field_selection_buttons:
             button.configure(state="disabled" if running else "normal")
@@ -1756,6 +1764,11 @@ class ExtractOdbApp(object):
         from odb_extract import merge_gui
 
         merge_gui.MergePointDataWindow(self.root)
+
+    def open_npz_export_window(self):
+        from odb_extract import npz_export
+
+        npz_export.MagnitudeCsvWindow(self.root)
 
     def _selected_fields(self):
         return [

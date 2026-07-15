@@ -5,7 +5,9 @@ from __future__ import print_function
 import csv
 import json
 import os
+import re
 import tempfile
+import threading
 
 import numpy as np
 
@@ -435,3 +437,318 @@ def export_magnitude_csv(
         "metadata_path": resolved_metadata,
         "row_count": row_count,
     }
+
+
+EXCEL_ROW_LIMIT = 1_048_576
+
+
+def _parse_filter_text(text):
+    values = [value for value in re.split(r"[,;\s]+", (text or "").strip()) if value]
+    return values or None
+
+
+class MagnitudeCsvWindow(object):
+    """Tkinter window for inspecting NPZ arrays and exporting magnitudes."""
+
+    def __init__(self, parent):
+        import tkinter as tk
+
+        self.tk = tk
+        self.root = tk.Toplevel(parent)
+        self.root.title("查看/转换 NPZ")
+        self.root.geometry("900x700")
+        self.root.minsize(760, 600)
+        self.data_var = tk.StringVar()
+        self.output_var = tk.StringVar()
+        self.components_var = tk.StringVar()
+        self.entities_var = tk.StringVar()
+        self.frequency_min_var = tk.StringVar()
+        self.frequency_max_var = tk.StringVar()
+        self.status_var = tk.StringVar(value="就绪")
+        self.source = None
+        self._running = False
+        self._build_widgets()
+
+    def _build_widgets(self):
+        tk = self.tk
+        from tkinter import ttk
+
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        frame = ttk.Frame(self.root, padding=12)
+        frame.grid(row=0, column=0, sticky="nsew")
+        frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(5, weight=1)
+
+        self._add_path_row(frame, 0, "NPZ 文件", self.data_var, self.choose_input)
+        self._add_path_row(frame, 1, "CSV 输出", self.output_var, self.choose_output)
+        self.load_button = ttk.Button(frame, text="读取并预览", command=self.load_source)
+        self.load_button.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 8))
+
+        filter_box = ttk.LabelFrame(frame, text="导出筛选（留空表示全部）")
+        filter_box.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        for column in range(4):
+            filter_box.columnconfigure(column, weight=1)
+        ttk.Label(filter_box, text="字段（可多选）").grid(
+            row=0, column=0, sticky="w", padx=6, pady=(6, 2)
+        )
+        ttk.Label(filter_box, text="分量").grid(
+            row=0, column=1, sticky="w", padx=6, pady=(6, 2)
+        )
+        ttk.Label(filter_box, text="节点/点/单元编号").grid(
+            row=0, column=2, sticky="w", padx=6, pady=(6, 2)
+        )
+        ttk.Label(filter_box, text="频率范围").grid(
+            row=0, column=3, sticky="w", padx=6, pady=(6, 2)
+        )
+        self.field_list = tk.Listbox(
+            filter_box, selectmode="extended", exportselection=False, height=5
+        )
+        self.field_list.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
+        ttk.Entry(filter_box, textvariable=self.components_var).grid(
+            row=1, column=1, sticky="new", padx=6, pady=(0, 6)
+        )
+        ttk.Entry(filter_box, textvariable=self.entities_var).grid(
+            row=1, column=2, sticky="new", padx=6, pady=(0, 6)
+        )
+        frequency_box = ttk.Frame(filter_box)
+        frequency_box.grid(row=1, column=3, sticky="new", padx=6, pady=(0, 6))
+        frequency_box.columnconfigure(0, weight=1)
+        frequency_box.columnconfigure(2, weight=1)
+        ttk.Entry(frequency_box, textvariable=self.frequency_min_var).grid(
+            row=0, column=0, sticky="ew"
+        )
+        ttk.Label(frequency_box, text="至").grid(row=0, column=1, padx=4)
+        ttk.Entry(frequency_box, textvariable=self.frequency_max_var).grid(
+            row=0, column=2, sticky="ew"
+        )
+
+        ttk.Label(frame, text="数组摘要").grid(row=4, column=0, sticky="w")
+        columns = ("shape", "dtype", "size", "nan")
+        self.array_tree = ttk.Treeview(
+            frame, columns=columns, show="tree headings", height=9
+        )
+        self.array_tree.heading("#0", text="数组")
+        self.array_tree.heading("shape", text="形状")
+        self.array_tree.heading("dtype", text="类型")
+        self.array_tree.heading("size", text="元素数")
+        self.array_tree.heading("nan", text="NaN 数")
+        self.array_tree.column("#0", width=220)
+        self.array_tree.column("shape", width=150)
+        self.array_tree.column("dtype", width=90)
+        self.array_tree.column("size", width=100)
+        self.array_tree.column("nan", width=90)
+        self.array_tree.grid(row=5, column=0, columnspan=3, sticky="nsew")
+        array_scrollbar = ttk.Scrollbar(frame, command=self.array_tree.yview)
+        array_scrollbar.grid(row=5, column=3, sticky="ns")
+        self.array_tree.configure(yscrollcommand=array_scrollbar.set)
+        self.array_tree.bind("<<TreeviewSelect>>", self.show_preview)
+
+        ttk.Label(frame, text="数组前 8 个值").grid(
+            row=6, column=0, sticky="w", pady=(8, 0)
+        )
+        self.preview_text = tk.Text(frame, height=4, wrap="word")
+        self.preview_text.grid(row=7, column=0, columnspan=3, sticky="ew")
+        self.preview_text.configure(state="disabled")
+
+        button_bar = ttk.Frame(frame)
+        button_bar.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        self.export_button = ttk.Button(
+            button_bar, text="导出幅值 CSV", command=self.start_export
+        )
+        self.export_button.pack(side="left")
+        ttk.Label(button_bar, textvariable=self.status_var).pack(side="left", padx=12)
+
+    def _add_path_row(self, frame, row, label, variable, command):
+        from tkinter import ttk
+
+        ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Entry(frame, textvariable=variable).grid(
+            row=row, column=1, sticky="ew", padx=(0, 6), pady=4
+        )
+        ttk.Button(frame, text="浏览", command=command).grid(
+            row=row, column=2, sticky="ew", pady=4
+        )
+
+    def choose_input(self):
+        from tkinter import filedialog
+
+        path = filedialog.askopenfilename(
+            title="选择 NPZ 文件",
+            filetypes=(("Compressed NumPy", "*.npz"), ("All files", "*.*")),
+        )
+        if not path:
+            return
+        self.data_var.set(path)
+        self.output_var.set(os.path.splitext(path)[0] + "_magnitude.csv")
+        self.load_source()
+
+    def choose_output(self):
+        from tkinter import filedialog
+
+        current = self.output_var.get().strip() or "magnitude.csv"
+        path = filedialog.asksaveasfilename(
+            title="选择幅值 CSV 输出",
+            defaultextension=".csv",
+            initialdir=os.path.dirname(current) or os.getcwd(),
+            initialfile=os.path.basename(current),
+            confirmoverwrite=True,
+            filetypes=(("CSV", "*.csv"), ("All files", "*.*")),
+        )
+        if path:
+            self.output_var.set(path)
+
+    def load_source(self):
+        from tkinter import messagebox
+
+        data_path = self.data_var.get().strip()
+        if not data_path:
+            messagebox.showerror("读取失败", "请选择 NPZ 文件。")
+            return False
+        try:
+            source = inspect_source(data_path)
+        except Exception as exc:
+            messagebox.showerror("读取失败", str(exc))
+            return False
+        self.source = source
+        self.field_list.delete(0, "end")
+        for field_name in source["fields"]:
+            self.field_list.insert("end", field_name)
+        if source["fields"]:
+            self.field_list.selection_set(0, "end")
+        for item in self.array_tree.get_children():
+            self.array_tree.delete(item)
+        for name, summary in source["arrays"].items():
+            self.array_tree.insert(
+                "",
+                "end",
+                iid=name,
+                text=name,
+                values=(
+                    " × ".join(str(value) for value in summary["shape"]),
+                    summary["dtype"],
+                    summary["size"],
+                    summary["nan_count"],
+                ),
+            )
+        children = self.array_tree.get_children()
+        if children:
+            self.array_tree.selection_set(children[0])
+            self.show_preview()
+        self.status_var.set(
+            "已读取 {} 个数组、{} 个字段".format(
+                len(source["arrays"]), len(source["fields"])
+            )
+        )
+        return True
+
+    def show_preview(self, _event=None):
+        if not self.source:
+            return
+        selected = self.array_tree.selection()
+        if not selected:
+            return
+        preview = self.source["arrays"][selected[0]]["preview"]
+        self.preview_text.configure(state="normal")
+        self.preview_text.delete("1.0", "end")
+        self.preview_text.insert("end", repr(preview))
+        self.preview_text.configure(state="disabled")
+
+    def _selected_fields(self):
+        return [self.field_list.get(index) for index in self.field_list.curselection()]
+
+    def _export_options(self):
+        data_path = self.data_var.get().strip()
+        output_path = self.output_var.get().strip()
+        if (
+            not self.source
+            or os.path.normcase(os.path.abspath(data_path))
+            != os.path.normcase(self.source["data_path"])
+        ):
+            raise ValueError("请先读取当前 NPZ 文件。")
+        fields = self._selected_fields()
+        if not fields:
+            raise ValueError("请至少选择一个字段。")
+        if not output_path:
+            raise ValueError("请设置 CSV 输出路径。")
+        minimum_text = self.frequency_min_var.get().strip()
+        maximum_text = self.frequency_max_var.get().strip()
+        frequency_min = float(minimum_text) if minimum_text else None
+        frequency_max = float(maximum_text) if maximum_text else None
+        if (
+            frequency_min is not None
+            and frequency_max is not None
+            and frequency_min > frequency_max
+        ):
+            raise ValueError("频率下限不能大于上限。")
+        return {
+            "data_path": data_path,
+            "output_path": output_path,
+            "metadata_path": self.source["metadata_path"],
+            "fields": fields,
+            "components": _parse_filter_text(self.components_var.get()),
+            "frequency_min": frequency_min,
+            "frequency_max": frequency_max,
+            "entity_ids": _parse_filter_text(self.entities_var.get()),
+        }
+
+    def start_export(self):
+        from tkinter import messagebox
+
+        if self._running:
+            return
+        try:
+            options = self._export_options()
+            estimate_options = dict(options)
+            estimate_options.pop("output_path")
+            row_count = estimate_export_rows(**estimate_options)
+        except Exception as exc:
+            messagebox.showerror("导出失败", str(exc))
+            return
+        if row_count + 1 > EXCEL_ROW_LIMIT and not messagebox.askyesno(
+            "数据量较大",
+            "预计导出 {:,} 行，超过 Excel 单工作表上限。是否继续？".format(
+                row_count
+            ),
+        ):
+            return
+        if os.path.exists(options["output_path"]) and not messagebox.askyesno(
+            "覆盖文件", "CSV 已存在，是否覆盖？"
+        ):
+            return
+        self._set_running(True)
+        worker = threading.Thread(target=self._export_worker, args=(options,))
+        worker.daemon = True
+        worker.start()
+
+    def _export_worker(self, options):
+        from tkinter import messagebox
+
+        try:
+            result = export_magnitude_csv(**options)
+        except Exception as exc:
+            error_message = str(exc)
+
+            def fail():
+                self._set_running(False)
+                messagebox.showerror("导出失败", error_message)
+
+            self.root.after(0, fail)
+            return
+
+        def finish():
+            self._set_running(False)
+            self.status_var.set("已导出 {:,} 行".format(result["row_count"]))
+            messagebox.showinfo(
+                "导出完成",
+                "幅值 CSV 已保存：\n{}".format(result["output_path"]),
+            )
+
+        self.root.after(0, finish)
+
+    def _set_running(self, running):
+        self._running = running
+        state = "disabled" if running else "normal"
+        self.load_button.configure(state=state)
+        self.export_button.configure(state=state)
+        self.status_var.set("正在导出" if running else "就绪")

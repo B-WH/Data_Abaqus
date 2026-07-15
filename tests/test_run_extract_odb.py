@@ -7,7 +7,7 @@ from unittest import mock
 
 import numpy as np
 
-from odb_extract import launcher, merge_gui
+from odb_extract import launcher, merge_gui, npz_export
 
 
 class LauncherTests(unittest.TestCase):
@@ -104,6 +104,30 @@ class LauncherTests(unittest.TestCase):
 
         self.assertIn('UI_TEXT["merge_results"]', build_source)
         self.assertIn("command=self.open_merge_window", build_source)
+
+    def test_build_widgets_has_npz_magnitude_export_button(self):
+        build_source = inspect.getsource(launcher.ExtractOdbApp._build_widgets)
+
+        self.assertIn('UI_TEXT["npz_magnitude_export"]', build_source)
+        self.assertIn("command=self.open_npz_export_window", build_source)
+
+    def test_open_npz_export_window_uses_converter_window(self):
+        source = inspect.getsource(launcher.ExtractOdbApp.open_npz_export_window)
+
+        self.assertIn("npz_export.MagnitudeCsvWindow(self.root)", source)
+
+    def test_npz_export_window_reuses_core_functions(self):
+        source = inspect.getsource(npz_export.MagnitudeCsvWindow)
+
+        self.assertIn("inspect_source(", source)
+        self.assertIn("estimate_export_rows(", source)
+        self.assertIn("export_magnitude_csv(", source)
+
+    def test_npz_export_filter_text_accepts_common_separators(self):
+        self.assertEqual(
+            npz_export._parse_filter_text("U1; U2, POR"),
+            ["U1", "U2", "POR"],
+        )
 
     def test_build_widgets_has_selected_field_cache_checkbox(self):
         build_source = inspect.getsource(launcher.ExtractOdbApp._build_widgets)
