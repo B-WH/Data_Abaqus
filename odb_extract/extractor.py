@@ -810,8 +810,11 @@ def save_npz(output_path, arrays):
 
 def save_metadata(metadata_path, metadata):
     ensure_parent_dir(metadata_path)
-    with io.open(metadata_path, "w", encoding="utf-8") as stream:
-        json.dump(metadata, stream, ensure_ascii=False, indent=2, sort_keys=True)
+    payload = json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True)
+    if not isinstance(payload, bytes):
+        payload = payload.encode("utf-8")
+    with io.open(metadata_path, "wb") as stream:
+        stream.write(payload)
 
 
 def build_metadata(

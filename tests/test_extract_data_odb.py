@@ -702,6 +702,23 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(saved_metadata["fields"], ["U"])
         self.assertEqual(saved_metadata["step"], "HARMONIC_RESPONSE")
 
+    def test_save_metadata_accepts_python2_bytes_payload(self):
+        metadata = {"fields": ["POR"]}
+        payload = b'{"fields": ["POR"]}'
+        metadata_path = "work/test-output/python2_metadata.json"
+        mocked_open = mock.mock_open()
+
+        with mock.patch.object(extractor, "ensure_parent_dir"), mock.patch.object(
+            extractor.json, "dumps", return_value=payload
+        ) as mocked_dumps, mock.patch.object(extractor.io, "open", mocked_open):
+            extractor.save_metadata(metadata_path, metadata)
+
+        mocked_dumps.assert_called_once_with(
+            metadata, ensure_ascii=False, indent=2, sort_keys=True
+        )
+        mocked_open.assert_called_once_with(metadata_path, "wb")
+        mocked_open().write.assert_called_once_with(payload)
+
     def test_csv_output_arguments_are_not_supported(self):
         with self.assertRaises(SystemExit):
             extractor.parse_args(["--csv-output", "node_set_data.csv"])
