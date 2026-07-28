@@ -121,8 +121,10 @@ metadata JSON 中的 `points[].method` 表示取值方式：
 ### 查看 NPZ 并导出幅值 CSV
 
 主窗口点击“查看/转换 NPZ”，选择本工具生成的 NPZ。程序自动读取配套 metadata，
-显示数组结构和预览，并可按字段、分量、频率及节点、点或单元编号筛选。导出的长表
-CSV 只包含复数结果的幅值 `magnitude = hypot(real, imag)`，不包含实部、虚部或相位。
+显示数组结构和预览，并可按字段、分量、频率及节点、点或单元编号筛选。导出的宽表
+以前三列记录频率、字段和分量，其后将点编号横向展开为列；点编号下先写 `x`、`y`、
+`z` 三行坐标，再按频率向下记录复数结果的幅值 `hypot(real, imag)`。
+CSV 不包含实部、虚部或相位。
 数据量超过 Excel 单工作表行数上限时，程序会在写出前提示确认。
 
 `points[]` 还会记录 `neighbor_labels`、`neighbor_weights` 和 `neighbor_distances`；

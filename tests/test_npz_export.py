@@ -90,12 +90,16 @@ class NpzExportTests(unittest.TestCase):
         )
 
         with open(output_path, newline="", encoding="utf-8-sig") as stream:
-            rows = list(csv.DictReader(stream))
-        self.assertEqual(result["row_count"], 1)
-        self.assertEqual(rows[0]["magnitude"], "5.0")
-        self.assertNotIn("real", rows[0])
-        self.assertNotIn("imag", rows[0])
-        self.assertNotIn("phase", rows[0])
+            reader = csv.DictReader(stream)
+            rows = list(reader)
+        self.assertEqual(result["row_count"], 4)
+        self.assertEqual(reader.fieldnames, ["frequency", "field", "component", "1"])
+        self.assertEqual([row["frequency"] for row in rows], ["x", "y", "z", "10.0"])
+        self.assertEqual([row["1"] for row in rows], ["0.0", "0.0", "0.0", "5.0"])
+        self.assertNotIn("magnitude", rows[-1])
+        self.assertNotIn("real", rows[-1])
+        self.assertNotIn("imag", rows[-1])
+        self.assertNotIn("phase", rows[-1])
 
     def test_estimate_export_rows_uses_the_same_filters(self):
         data_path, metadata_path = self.write_node_source()
@@ -109,21 +113,31 @@ class NpzExportTests(unittest.TestCase):
             entity_ids=["2"],
         )
 
-        self.assertEqual(row_count, 1)
+        self.assertEqual(row_count, 4)
 
-    def test_export_preserves_nan_magnitude(self):
+    def test_export_places_point_ids_horizontally_and_magnitudes_vertically(self):
         data_path, metadata_path = self.write_node_source()
         output_path = os.path.join(self.output_dir, "nan.csv")
 
-        npz_export.export_magnitude_csv(
+        result = npz_export.export_magnitude_csv(
             data_path,
             output_path,
             metadata_path=metadata_path,
         )
 
         with open(output_path, newline="", encoding="utf-8-sig") as stream:
-            rows = list(csv.DictReader(stream))
-        self.assertTrue(math.isnan(float(rows[-1]["magnitude"])))
+            reader = csv.DictReader(stream)
+            rows = list(reader)
+        self.assertEqual(
+            reader.fieldnames, ["frequency", "field", "component", "1", "2"]
+        )
+        self.assertEqual(result["row_count"], 5)
+        self.assertEqual([row["frequency"] for row in rows[:3]], ["x", "y", "z"])
+        self.assertEqual([row["1"] for row in rows[:3]], ["0.0", "0.0", "0.0"])
+        self.assertEqual([row["2"] for row in rows[:3]], ["1.0", "0.0", "0.0"])
+        self.assertEqual([row["1"] for row in rows[3:]], ["5.0", "8.0"])
+        self.assertEqual(rows[3]["2"], "5.0")
+        self.assertTrue(math.isnan(float(rows[4]["2"])))
 
     def test_export_rejects_mismatched_shapes_without_replacing_output(self):
         data_path, metadata_path = self.write_node_source(
@@ -193,9 +207,8 @@ class NpzExportTests(unittest.TestCase):
         )
 
         with open(output_path, newline="", encoding="utf-8-sig") as stream:
-            row = next(csv.DictReader(stream))
-        self.assertEqual(row["point_id"], "p1")
-        self.assertEqual(row["magnitude"], "5.0")
+            rows = list(csv.DictReader(stream))
+        self.assertEqual([row["p1"] for row in rows], ["1.0", "2.0", "3.0", "5.0"])
 
     def test_export_supports_element_identity(self):
         data_path, metadata_path = self.write_location_source(
@@ -217,8 +230,7 @@ class NpzExportTests(unittest.TestCase):
 
         with open(output_path, newline="", encoding="utf-8-sig") as stream:
             row = next(csv.DictReader(stream))
-        self.assertEqual(row["element_label"], "10")
-        self.assertEqual(row["integration_point"], "1")
+        self.assertEqual(row["10"], "5.0")
 
     def test_export_supports_generic_value_identity(self):
         data_path, metadata_path = self.write_location_source(
@@ -236,8 +248,7 @@ class NpzExportTests(unittest.TestCase):
 
         with open(output_path, newline="", encoding="utf-8-sig") as stream:
             row = next(csv.DictReader(stream))
-        self.assertEqual(row["value_index"], "0")
-        self.assertEqual(row["magnitude"], "5.0")
+        self.assertEqual(row["0"], "5.0")
 
 
 if __name__ == "__main__":

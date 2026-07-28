@@ -13,30 +13,6 @@ import numpy as np
 
 
 COMMON_COLUMNS = ("frequency", "field", "component")
-VALUE_COLUMN = "magnitude"
-IDENTITY_COLUMNS = {
-    "NODE": ("instance", "node_label", "x", "y", "z"),
-    "POINT": ("point_id", "x", "y", "z"),
-    "ELEMENT": (
-        "instance",
-        "element_label",
-        "integration_point",
-        "section_point",
-    ),
-    "VALUE": ("instance", "value_index"),
-}
-IDENTITY_COLUMN_ORDER = (
-    "instance",
-    "node_label",
-    "point_id",
-    "element_label",
-    "integration_point",
-    "section_point",
-    "value_index",
-    "x",
-    "y",
-    "z",
-)
 
 
 def _metadata_path(data_path, metadata_path=None):
@@ -322,33 +298,83 @@ def _prepare_export(
     return frequencies, frame_indexes, specs
 
 
+def _entity_columns(spec):
+    columns = [
+        (_primary_identity(spec["identities"][index]), index)
+        for index in spec["entity_indexes"]
+    ]
+    names = [name for name, _index in columns]
+    if len(names) != len(set(names)):
+        raise ValueError(
+            "Field {} has duplicate entity identifiers.".format(spec["name"])
+        )
+    conflicts = sorted(set(names).intersection(COMMON_COLUMNS))
+    if conflicts:
+        raise ValueError(
+            "Entity identifier conflicts with CSV column: {}".format(conflicts[0])
+        )
+    return columns
+
+
 def _selected_columns(specs):
-    used = set()
+    columns = list(COMMON_COLUMNS)
+    used = set(columns)
     for spec in specs:
-        used.update(IDENTITY_COLUMNS[spec["location"]])
-    identity_columns = [name for name in IDENTITY_COLUMN_ORDER if name in used]
-    return list(COMMON_COLUMNS) + identity_columns + [VALUE_COLUMN]
+        for name, _index in _entity_columns(spec):
+            if name not in used:
+                columns.append(name)
+                used.add(name)
+    return columns
+
+
+def _coordinate_rows(specs):
+    coordinates = {}
+    for spec in specs:
+        for column, entity_index in _entity_columns(spec):
+            identity = spec["identities"][entity_index]
+            if not all(axis in identity for axis in ("x", "y", "z")):
+                continue
+            values = tuple(float(identity[axis]) for axis in ("x", "y", "z"))
+            if column in coordinates and coordinates[column] != values:
+                raise ValueError(
+                    "Entity {} has inconsistent coordinates.".format(column)
+                )
+            coordinates[column] = values
+    if not coordinates:
+        return []
+    rows = []
+    for coordinate_index, axis in enumerate(("x", "y", "z")):
+        row = {"frequency": axis}
+        row.update(
+            {
+                column: values[coordinate_index]
+                for column, values in coordinates.items()
+            }
+        )
+        rows.append(row)
+    return rows
 
 
 def _iter_selected_rows(frequencies, frame_indexes, specs):
     for spec in specs:
+        entity_columns = _entity_columns(spec)
+        if not entity_columns:
+            continue
         for frame_index in frame_indexes:
-            for entity_index in spec["entity_indexes"]:
-                identity = spec["identities"][entity_index]
-                for component_index in spec["component_indexes"]:
-                    row = {
-                        "frequency": float(frequencies[frame_index]),
-                        "field": spec["name"],
-                        "component": spec["components"][component_index],
-                        VALUE_COLUMN: float(
-                            np.hypot(
-                                spec["real"][frame_index, entity_index, component_index],
-                                spec["imag"][frame_index, entity_index, component_index],
-                            )
-                        ),
-                    }
-                    row.update(identity)
-                    yield row
+            for component_index in spec["component_indexes"]:
+                row = {
+                    "frequency": float(frequencies[frame_index]),
+                    "field": spec["name"],
+                    "component": spec["components"][component_index],
+                }
+                for column, entity_index in entity_columns:
+                    row[column] = float(
+                        np.hypot(
+                            spec["real"][frame_index, entity_index, component_index],
+                            spec["imag"][frame_index, entity_index, component_index],
+                        )
+                    )
+                yield row
 
 
 def estimate_export_rows(
@@ -360,7 +386,7 @@ def estimate_export_rows(
     frequency_max=None,
     entity_ids=None,
 ):
-    """Return the selected long-table row count."""
+    """Return the selected wide-table row count."""
     _resolved_metadata, metadata = _load_metadata(data_path, metadata_path)
     with np.load(data_path) as data:
         _frequencies, frame_indexes, specs = _prepare_export(
@@ -372,11 +398,11 @@ def estimate_export_rows(
             frequency_max=frequency_max,
             entity_ids=entity_ids,
         )
-        return sum(
+        return len(_coordinate_rows(specs)) + sum(
             len(frame_indexes)
-            * len(spec["entity_indexes"])
             * len(spec["component_indexes"])
             for spec in specs
+            if spec["entity_indexes"]
         )
 
 
@@ -390,7 +416,7 @@ def export_magnitude_csv(
     frequency_max=None,
     entity_ids=None,
 ):
-    """Atomically export selected complex-field magnitudes to CSV."""
+    """Atomically export selected magnitudes with entity IDs as CSV columns."""
     data_path = os.path.abspath(data_path)
     output_path = os.path.abspath(output_path)
     resolved_metadata, metadata = _load_metadata(data_path, metadata_path)
@@ -424,6 +450,9 @@ def export_magnitude_csv(
             ) as stream:
                 writer = csv.DictWriter(stream, fieldnames=_selected_columns(specs))
                 writer.writeheader()
+                for row in _coordinate_rows(specs):
+                    writer.writerow(row)
+                    row_count += 1
                 for row in _iter_selected_rows(frequencies, frame_indexes, specs):
                     writer.writerow(row)
                     row_count += 1
